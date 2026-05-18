@@ -1,0 +1,113 @@
+---
+- name: jdkupdateforapp
+  hosts: "{{ host_filter }}"
+  gather_facts: false
+
+  tasks:
+    - name: Ping target host
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Show success message
+      ansible.builtin.debug:
+        msg: "success"
+      when: ping_result.ping == 'pong'
+
+    - name: Check for Java processes
+      ansible.builtin.shell: "ps -ef | grep java"
+      register: ps_result
+      changed_when: false
+
+    - name: Show Java process output
+      ansible.builtin.debug:
+        var: ps_result.stdout_lines
+
+    - name: Switch to tcserver user and verify
+      ansible.builtin.shell: 'su - tcserver -c "whoami"'
+      become: yes
+      register: su_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show su result
+      ansible.builtin.debug:
+        var: su_result.stdout
+
+- name: Create tcserver archive and back up tomcat
+  hosts: "{{ host_filter }}"
+  become: yes
+  vars:
+    jdk_base: "{{ tc_base }}/java"
+    tcserver_instance_dir: "{{ tc_base }}/tcserver/pivotal-tc-server/instances/nexlynkdms"
+
+  tasks:
+    # zip is assumed present on the host; no installation step required
+
+    # the following operations will run unconditionally
+
+
+    - name: Ensure jdk base directory exists
+      file:
+        path: "{{ jdk_base }}"
+        state: directory
+        mode: '0755'
+
+    - name: List contents of tcserver base
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ jdk_base }}"
+      become_user: tcserver
+      register: ls_before
+
+    - name: Show listing before operations
+      ansible.builtin.debug:
+        var: ls_before.stdout_lines
+
+    - name: Check tcserver instance directory exists
+      ansible.builtin.stat:
+        path: "{{ tcserver_instance_dir }}"
+      register: tcserver_instance_dir_stat
+      become_user: tcserver
+
+    - name: Fail if tcserver instance directory is missing
+      ansible.builtin.fail:
+        msg: "instance directory {{ tcserver_instance_dir }} does not exist"
+      when: not tcserver_instance_dir_stat.stat.exists
+
+      
+    - name: Extract tar archive
+      ansible.builtin.unarchive:
+        src: /home/tcserver/OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz
+        dest: "{{ jdk_base }}"
+        remote_src: yes
+      become_user: tcserver
+
+    
+    - name: Check if setenv.sh exists
+      ansible.builtin.stat:
+        path: "{{ tcserver_instance_dir }}/bin/setenv.sh"
+      register: root_setenv_stat
+      become: yes
+      become_user: tcserver
+       
+    - name: Update setenv.sh jdk version in tcserver bin directory
+      ansible.builtin.replace:
+        path: "{{ tcserver_instance_dir }}/bin/setenv.sh"
+        regexp: 'jdk8u472-b08'
+        replace: 'jdk8u482-b08'
+        backup: yes
+      become: yes
+      become_user: tcserver
+      when: root_setenv_stat.stat.exists
+
+    - name: List tcserver instance directory after operations
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ tcserver_instance_dir }}"
+      become_user: tcserver
+      register: ls_after
+
+    - name: Show listing after operations
+      ansible.builtin.debug:
+        var: ls_after.stdout_lines
+
