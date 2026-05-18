@@ -1,0 +1,527 @@
+- name: Server (service) Restart Playbook (under development)
+  hosts: "{{ host_filter }}"
+  gather_facts: yes
+#  any_errors_fatal: false
+
+  # Make sure we only work on 1 server at a time
+  # In case of a restart failure, we do not want to restart others
+  serial: 1
+  
+  vars_files:
+    - file_vars/globalServerRestart.yml
+    - file_vars/notificationDistributionList.yml
+    - file_vars/vault.yml
+
+  vars:
+    # You can leave this next variable undefined in case you do not want to trigger 
+    # emails going out for WARNING (process continues) or ERROR (process fails) conditions 
+    sr_email_obj: 
+      subject: "Automated ServerRestart"
+      body: "Server Restart for server: {{ ansible_hostname }}<br/>"
+      to: "{{ server_restart_dl }}"
+      level: "warning"
+      subtype: "html"
+    logs_removal_pattern: "*.gz,*.log,*.txt"
+    logs_removal_age: "{{ use_logs_removal_age }}"
+#    use_systemctl: "false"
+
+  tasks:
+
+  # The util server generally runs two different services (before NL 4.5 rollouts) - jasperserver (default) and iguana
+  # Check the external variable 'target_service', and when specified as 'iguana' then set the required fields to the correct values
+  # As of NL4.5 rollouts it can also have hcomm included
+  - name: "Override role variables for host util and target_service of 'iguana'"
+    block:
+      - name: "Step 0): Prepare os_service_label"
+        set_fact: os_service_label="{{ os_service_iguana_label }}"
+        
+      - name: "Step 0): Prepare nl_service_type"
+        set_fact: nl_service_type="{{ nl_service_iguana_type }}"
+        
+      - name: "Step 0): Prepare os_service_active"
+        set_fact: os_service_active="{{ os_service_iguana_active }}"
+        
+      - name: "Step 0): Prepare os_service_login_check_url"
+        set_fact: os_service_login_check_url="http://{{ ansible_default_ipv4.address }}:6543/login.html"
+
+    when: target_service is defined and (host_filter == "util" or host_filter == "util_hc") and target_service == "iguana" 
+
+  - name: "Override role variables for host util and target_service of 'hcomm'"
+    block:
+      - name: "Step 0): Prepare os_service_label"
+        set_fact: os_service_label="{{ os_service_hcomm_label }}"
+        
+      - name: "Step 0): Prepare nl_service_type"
+        set_fact: nl_service_type="{{ nl_service_hcomm_type }}"
+        
+      - name: "Step 0): Prepare os_service_active"
+        set_fact: os_service_active="{{ os_service_hcomm_active }}"
+        when: os_version != "os8"
+
+      - name: "Step 0): Prepare os_service_active"
+        set_fact: os_service_active="{{ os_systemctl_hcomm_active }}"
+        when: os_version == "os8"
+        
+      - name: "Step 0): Prepare os_service_log_path"
+        set_fact: os_service_log_path="{{ hcomm_log_path}}"
+        
+      - name: "Step 0): Prepare os_service_login_check_url"
+        set_fact: os_service_login_check_url="http://{{ ansible_default_ipv4.address }}:8100" 
+
+    when: target_service is defined and (host_filter == "util" or host_filter == "util_hc" or host_filter == "hc") and target_service == "hcomm" 
+
+  - name: "Override service for systemctl for app server"
+    block:
+      - name: "Step 0): Prepare use_systemctl"
+        set_fact: use_systemctl="true"
+    
+    when: client_code == "thp" and nl_service_type == "app" and os_service_label == "tcServer"
+    tags: systemctl
+
+
+  # Display some details before we get started - show which server has the service restarted, etc.
+  # We only process 1 server/host at a time (that is why we have serial: 1) 
+  - name: "Step 0) Server Restart cycle is commencing for:"
+    debug:
+      msg: "Hostname: {{ ansible_hostname }} - Inventory grps: {{ group_names }} - Service: {{ os_service_label }} - Service type: {{ nl_service_type }} - Target Host(s): {{ host_filter }}"
+
+# Step 1: Remove from LB when appropriate
+# Error when already disabled
+# Error when LB name is wrong - or LB calls to Nitro fail for technical reasons
+#  - name: "Step 1) Disable server on Load Balancer (LB) before service is stopped"
+#    include_role:
+#      name: lb_set_status-r
+#    vars: 
+#      use_lb_name: "{{ lb_name }}"  
+#      use_action: disable
+#      lb_default_disable_wait_time: 10
+#      display_before_after_flg: true 
+#      display_action_flg: true
+#      r_lb_ss_name_prefix: "Step 1."
+#      lb_ss_email_obj: "{{ sr_email_obj }}"
+#      lb_validate: true
+#    when: (lb_name is defined) and (lb_name != "null") and (lb_name | length > 0) and (client_code !="bpos" and client_code !="adma" and client_code !="abo" and client_code !="pro")    
+
+  - name: "Step 1) Disable server on Load Balancer (LB) before service is stopped"
+    include_role:
+      name: lb_set_status-p
+    vars: 
+      use_lb_name: "{{ lb_name }}"  
+      use_action: disable
+      lb_default_disable_wait_time: 10
+      display_before_after_flg: true 
+      display_action_flg: true
+      r_lb_ss_name_prefix: "Step 1."
+      lb_ss_email_obj: "{{ sr_email_obj }}"
+      lb_validate: true
+      use_client_code: "{{ client_code }}"
+    when: (lb_name is defined) and (lb_name != "null") and (lb_name | length > 0) and (client_code !="imtk")
+
+  - name: "Step 1) Disable server on Load Balancer (LB) before service is stopped"
+    include_role:
+      name: lb_set_status-p
+    vars: 
+      use_lb_name: "{{ lb_name }}"  
+      use_action: disable
+      lb_default_disable_wait_time: 10
+      display_before_after_flg: true 
+      display_action_flg: true
+      r_lb_ss_name_prefix: "Step 1."
+      lb_ss_email_obj: "{{ sr_email_obj }}"
+      lb_validate: true
+      use_client_code: "ked"
+    when: (lb_name is defined) and (lb_name != "null") and (lb_name | length > 0) and (client_code =="imtk")
+# Step 2: Stop the service at hand    
+# Error when already stopped
+# Error when service start/stop/status is wrong - misconfigured or command invalid somehow
+
+  - name: "Step 2) Stop the applicable service: {{ os_service_label }}"
+    include_role:
+      name: os_service
+    vars:  
+      os_service_name: "{{ os_service_label }}"
+      os_service_action: "stop"
+      os_service_check_text: "{{ os_service_active }}"
+      os_service_validation_obj: 
+        expected_value: "{{ os_service_active }}"
+        fail: true 
+        fail_text: "The service to be stopped ({{ os_service_label }}) is currently not running - <u>Restart has been aborted</u>"
+        email_level: "error"
+      os_service_name_prefix: "Step 2."
+      os_service_email_obj: "{{ sr_email_obj }}"
+#      systemctl_flag: "{{ use_systemctl }}"
+#      use_client_code: "{{ client_code }}"
+#      os_service_display_flg: true
+#      os_service_display_summary_flg: false
+#      os_service_check_current_flg: true
+    tags: systemctl
+    
+# Step 3: Backup any log files   
+# Warnings will be triggered if this backup step has any sort of technical issue
+# ServerRestart will not fail though
+  - name: "Step 3a) Backup the main log files"
+    include_role:
+      name: backup_logs
+    vars:  
+      source_log_path: "{{ os_service_log_path }}"
+      backup_incl_seconds_flg: false
+      backup_gzip_flg: true
+      backup_logs_name_prefix: "Step3a."
+      backup_logs_email_obj: "{{ sr_email_obj }}"
+    when: (nl_service_type == "app" or nl_service_type == "hcomm" or (nl_service_type == "rpt" and os_service_label== "jasperserver"))
+
+  - name: "Step 3b) Backup the secondary log files"
+    include_role:
+      name: backup_logs
+    vars:  
+      source_log_path: "{{ os_service_log_path }}/http"
+      backup_incl_seconds_flg: false
+      backup_gzip_flg: true
+      backup_logs_name_prefix: "Step3b."
+      backup_logs_email_obj: "{{ sr_email_obj }}"
+    when: nl_service_type == "hcomm"
+    
+# Step 4: Start the service at hand    
+# Only warnings will go out if the restart step fails
+  - name: "Step 4) Start the applicable service: {{ os_service_label }}"
+    include_role:
+      name: os_service
+    vars:  
+      os_service_name: "{{ os_service_label }}"
+      os_service_action: start
+      os_service_name_prefix: "Step 4."
+      os_service_email_obj: "{{ sr_email_obj }}"
+      os_service_display_summary_flg: false
+      os_service_check_current_flg: false
+      use_client_code: "{{ client_code }}"
+#      os_service_check_text: "{{ os_service_active }}"
+#      os_service_display_flg: true  
+#    tags: systemctl 
+
+# Step 5: Wait for st.dnr.server.log when restarting an app server
+  - name: "Technical error handling block for when the restart take slonger than the waiting period"
+    block:
+      - name: "Step 5): Wait for app server startup to complete (maximum of 20 minutes)"
+        wait_for:
+          path: "{{ os_service_log_path }}/st.dnr.server.log"
+          sleep: 30
+          timeout: 1200
+        register: wait_restart_result
+
+    rescue:
+      - name: "Step 5) Error handling for when restarts takes too long - sending eMail"
+        include_role:
+          name: send_email
+        vars: 
+          email_subject: "{{ sr_email_obj.subject }}"
+          email_body: "{{ sr_email_obj.body }}<br/>Service restart is taking longer than 20 minutes (other emails with more details might follow) - <b>Restart will continue but manual checks should be made</b><br/><br/>Warning details:<br/><br/><pre>{{ wait_restart_result | to_nice_json }}</pre>"
+          email_to: "{{ sr_email_obj.to }}"
+          email_level: warning
+          email_subtype: "{{ sr_email_obj.subtype }}"
+        when: sr_email_obj is defined
+          
+    when: nl_service_type == "app"
+    
+# Step 6a: appstatus.jsp check
+# Error when it fails??  Not all clients (NL versions) have the appStatus.jsp pages
+# Warn when this step misconfigured??
+  - name: "Technical error handling block for when the appStatus.jsp page timesout"
+    block:
+      - name: Use default app status port of 8181 when not specified in host file
+        set_fact: app_status_port=8181
+        when: (app_status_port is undefined)
+        
+      - name: "Step 6a): Check appStatus.jsp"
+        uri:
+          url: "http://{{ inventory_hostname }}:{{ app_status_port }}/appStatus.jsp"
+          method: GET
+          return_content: yes
+          timeout: 60
+        register: http_resp_appstatus
+        delegate_to: localhost
+        when: (systemctl_flag is not defined) or (not systemctl_flag | bool)
+
+#Added below for ABO val as the last few times, we have seen ABO login page is not up within the time for this check and it fails // Supreet April 2,2024
+#Extended time to 5 mins based on DD logs
+      - name: "Step 6b): Sleep for 5 minutes for ABO val app1(only) for env Status check"
+        wait_for:
+          timeout: 300
+        delegate_to: localhost
+        when: (client_code == "abo") and (client_env == "val")
+
+#Added IMTK and KED due to observed failures from these servers
+      - name: "Step 6b): Sleep for 1 minute for IMTK, and KED val app1(only) for env Status check"
+        wait_for:
+          timeout: 60
+        delegate_to: localhost
+        when: (client_code == "imtk" or client_code == "ked") and (client_env == "val")
+
+      - name: "Step 6a): Check envStatus.jsp for nexlynk version 4.7 and up"
+        uri:
+          url: "{{ os_service_envStatus_check_url }}"
+          method: GET
+          return_content: yes
+          timeout: 60
+        register: http_resp_envstatus
+        delegate_to: localhost
+        when: (systemctl_flag is defined) and (systemctl_flag | bool) 
+
+      - name: "Step 6b) Result for appStatus.jsp check"
+        debug:
+         msg: "{{ http_resp_appstatus }}"
+
+      - name: "Step 6b) Result for envStatus.jsp check"
+        debug:
+         msg: "{{ http_resp_envstatus }}"
+   
+    rescue:
+      - name: "Step 6b) Error handling for when appStatus.jsp fails - sending eMail"
+        include_role:
+          name: send_email
+        vars: 
+          email_subject: "{{ sr_email_obj.subject }}"
+          email_body: "{{ sr_email_obj.body }}<br/>appStatus.jsp page failed to load (other emails with more details might follow) - <b>Restart will continue but manual checks should be made</b><br/><br/>Warning details:<br/><br/><pre>{{ http_resp_appstatus | to_nice_json | replace('\r\n', '') }}</pre>"
+          email_to: "{{ sr_email_obj.to }}"
+          email_level: warning
+          email_subtype: "{{ sr_email_obj.subtype }}"
+        when: sr_email_obj is defined and ((systemctl_flag is not defined) or (not systemctl_flag | bool))
+
+      - name: "Step 6b) Error handling for when envStatus.jsp fails - sending eMail"
+        include_role:
+          name: send_email
+        vars: 
+          email_subject: "{{ sr_email_obj.subject }}"
+          email_body: "{{ sr_email_obj.body }}<br/>envStatus.jsp page failed to load (other emails with more details might follow) - <b>Restart will continue but manual checks should be made</b><br/><br/>Warning details:<br/><br/><pre>{{ http_resp_envstatus | to_nice_json | replace('\r\n', '') }}</pre>"
+          email_to: "{{ sr_email_obj.to }}"
+          email_level: warning
+          email_subtype: "{{ sr_email_obj.subtype }}"
+        when: sr_email_obj is defined and ((systemctl_flag is defined) and (systemctl_flag | bool))
+    #ADMA is older version of NL that doesn't have these appStatus.jsp pages, thus this validation is not applicable
+    when: (nl_service_type == "app") 
+    #ADMA has upgraded to 4.8.1, including this validation for them now // Supreet October 4,2023
+ #   and (client_code != "adma")
+    
+# status of 200, and content should not contain the words timeout or error
+# perhaps format the output a bit better for visual inspection      
+  - name: "Functional error handling block for when the appStatus.jsp/(envStatus.jsp for 4.7+) page fails (shows error values for at least one module)"
+    block:
+      - name: "Step 6c) Perform the check assert"
+        assert:
+          that: "{{ (http_resp_appstatus.status == 200) and http_resp_appstatus.content.find('>TIMEOUT<')<0 and http_resp_appstatus.content.find('>ERROR<')<0 }}"
+          fail_msg: "Problem with appStatus.jsp page"
+          success_msg: "appStatus.jsp page check passed"
+        when: (systemctl_flag is not defined) or (not systemctl_flag | bool)
+
+      - name: "Step 6c) Perform the check assert"
+        assert:
+          that: "{{ (http_resp_envstatus.status == 200) and http_resp_envstatus.content.find('>TIMEOUT<')<0 and http_resp_envstatus.content.find('>ERROR<')<0 }}"
+          fail_msg: "Problem with envStatus.jsp page"
+          success_msg: "envStatus.jsp page check passed"
+        when: (systemctl_flag is defined) and (systemctl_flag | bool)
+
+    rescue:
+      # By removing '\r\n' the page repsonse will show nicely in the HTML email
+      - set_fact: http_resp_appstatus="{{ http_resp_appstatus | replace('\\r\\n','') }}"
+      - set_fact: http_resp_envstatus="{{ http_resp_envstatus | replace('\\r\\n','') }}"
+
+      - name: "Step 6d) Error handling for when appStatus.jsp fails - sending eMail"
+        include_role:
+          name: send_email
+        vars: 
+          email_subject: "{{ sr_email_obj.subject }}"
+          email_body: "{{ sr_email_obj.body }}<br/>appStatus.jsp page failed (other emails with more details might follow) - <b>Restart will continue but manual checks should be made</b><br/><br/>Warning details:<br/><br/><pre>{{ http_resp_appstatus | to_nice_json }}</pre>"
+          email_to: "{{ sr_email_obj.to }}"
+          email_level: warning
+          email_subtype: "{{ sr_email_obj.subtype }}"
+        when: sr_email_obj is defined and ((systemctl_flag is not defined) or (not systemctl_flag | bool)) 
+
+      - name: "Step 6d) Error handling for when envStatus.jsp fails - sending eMail"
+        include_role:
+          name: send_email
+        vars: 
+          email_subject: "{{ sr_email_obj.subject }}"
+          email_body: "{{ sr_email_obj.body }}<br/>envStatus.jsp page failed (other emails with more details might follow) - <b>Restart will continue but manual checks should be made</b><br/><br/>Warning details:<br/><br/><pre>{{ http_resp_envstatus | to_nice_json }}</pre>"
+          email_to: "{{ sr_email_obj.to }}"
+          email_level: warning
+          email_subtype: "{{ sr_email_obj.subtype }}"
+        when: sr_email_obj is defined and ((systemctl_flag is defined) and (systemctl_flag | bool))  
+    #ADMA is older version of NL that doesn't have these appStatus.jsp pages, thus this validation is not applicable
+    when: nl_service_type == "app" 
+    #ADMA has upgraded to 4.8.1, including this validation for them now // Supreet October 4,2023
+    #and (client_code != "adma")
+    
+# Step 6b: Verifinger check
+# Warning or error when it fails?? 
+# Warn when this step misconfigured??
+  - name: "Technical error handling block for when the Verifinger check fails"
+    block:
+      - name: "Step 6e): Verifinger check"
+        shell: "{{ verifingerShell }}"
+        register: verifinger_status
+
+      - name: "Step 6f) Result for Verifinger check"
+        debug:
+          msg: "{{ verifinger_status }}"
+    
+    rescue:
+
+      - name: "Step 6g) Error handling for Verifinger check fails - sending eMail"
+        include_role:
+          name: send_email
+        vars: 
+          email_subject: "{{ sr_email_obj.subject }}"
+          email_body: "{{ sr_email_obj.body }}<br/>Verifinger check failed - <b>Restart will continue but manual checks should be made</b><br/><br/>Warning details:<br/><br/><pre>{{ verifinger_status | to_nice_json }}</pre>"
+          email_to: "{{ sr_email_obj.to }}"
+          email_level: warning
+          email_subtype: "{{ sr_email_obj.subtype }}"
+        when: sr_email_obj is defined      
+
+    when: nl_service_type == "app" and (verifingerShell is defined) and (verifingerShell != "null") and (verifingerShell|length > 0)  
+        
+  - name: "Functional error handling block for when the Verifinger check fails"
+    block:
+      - name: "Step 6h) Perform the verifinger check assert"
+        assert:
+          that: "{{ verifinger_status.stdout.find('not available')<0 }}"
+          fail_msg: "Verifinger check failed, it appears that at least one Verifinger License is not active"
+          success_msg: "Verifinger page check passed"    
+
+    rescue:
+      - name: "Step 6i) Error handling for Verifinger check fails - sending eMail"
+        include_role:
+          name: send_email
+        vars: 
+          email_subject: "{{ sr_email_obj.subject }}"
+          email_body: "{{ sr_email_obj.body }}<br/>Verifinger check failed, it appears that at least one Verifinger License is not active - <b>Restart will continue but manual checks should be made</b><br/><br/>Warning details:<br/><br/><pre>{{ verifinger_status | to_nice_json }}</pre>"
+          email_to: "{{ sr_email_obj.to }}"
+          email_level: warning
+          email_subtype: "{{ sr_email_obj.subtype }}"
+        when: sr_email_obj is defined      
+
+    when: nl_service_type == "app" and (verifingerShell is defined) and (verifingerShell != "null") and (verifingerShell|length > 0)  
+
+              
+# Step 7: Add back to LB when appropriate
+# Error when this fails for some reason - as we might have to re-enable the LB entry manually
+#  - name: "Step 7) Enable server on Load Balancer (LB) now that service has restarted"
+#    include_role:
+#      name: lb_set_status-r
+#    vars: 
+#      use_lb_name: "{{ lb_name }}" 
+#      use_action: "enable"
+#      display_before_after_flg: true 
+#      display_action_flg: true
+#      r_lb_ss_name_prefix: "Step 7."
+#      lb_ss_email_obj: "{{ sr_email_obj }}"
+#      lb_validate: true
+#    when: (lb_name is defined) and (lb_name != "null") and (lb_name|length > 0) and (client_code !="bpos" and client_code !="adma" and client_code !="abo" and client_code !="pro")
+
+  - name: "Step 7) Enable server on Load Balancer (LB) now that service has restarted"
+    include_role:
+      name: lb_set_status-p
+    vars: 
+      use_lb_name: "{{ lb_name }}" 
+      use_action: "enable"
+      display_before_after_flg: true 
+      display_action_flg: true
+      r_lb_ss_name_prefix: "Step 7."
+      lb_ss_email_obj: "{{ sr_email_obj }}"
+      lb_validate: true
+      use_client_code: "{{ client_code }}"
+    when: (lb_name is defined) and (lb_name != "null") and (lb_name|length > 0) and (client_code !="imtk")
+    
+  - name: "Step 7) Enable server on Load Balancer (LB) now that service has restarted"
+    include_role:
+      name: lb_set_status-p
+    vars: 
+      use_lb_name: "{{ lb_name }}" 
+      use_action: "enable"
+      display_before_after_flg: true 
+      display_action_flg: true
+      r_lb_ss_name_prefix: "Step 7."
+      lb_ss_email_obj: "{{ sr_email_obj }}"
+      lb_validate: true
+      use_client_code: "ked"
+    when: (lb_name is defined) and (lb_name != "null") and (lb_name|length > 0) and (client_code =="imtk")
+
+# Step 7b Log cleanup - log_removal role can help with limiting the number of log file we keep on hand    
+  - name: "Clean up old log file"
+    include_role:
+      name: log_removal
+    vars:
+      removal_folder_path: "{{ item }}"
+      removal_age: "{{ logs_removal_age }}"
+      removal_recurse: "yes"
+      removal_folder_pattern: "*"
+      removal_file_pattern: "{{ logs_removal_pattern }}"
+      removal_display_flg: true
+      removal_delete_flg: true
+      removal_incl_files_flg: false
+      display_folder_size_flg: true
+    with_items: 
+      - "{{ os_service_log_path }}"
+    when: os_service_label != "iguana"
+    
+# Step 8: Login page check
+# This test still works as long at one app server is working
+# Not a good test perse for app servers, better for the util server
+
+  - name: "Technical error handling block for when the login page check fails"
+    block:
+      - name: "Step 8a): Check applicable login page - {{ os_service_login_check_url }}"
+        uri:
+          url: "{{ os_service_login_check_url }}"
+          method: GET
+          return_content: yes
+          follow_redirects: all
+          timeout: 90
+          status_code: 200
+        register: http_resp_login_check
+        delegate_to: localhost
+
+      - name: "Step 8b) Result for login page check - status of 200 is what we want"
+        debug:
+          msg: "URL: {{ http_resp_login_check.url }} - HTTP Status: {{ http_resp_login_check.status }}"
+
+    rescue:
+    
+      # First page after a restart can take a bit longer sometimes
+      # We'll wait for a few seconds and then retry
+      - name: "Technical error handling block for when the login page check fails"
+        block:     
+          - name: "Step 8c): Sleep for 30 seconds and retry login page"
+            wait_for:
+              timeout: 30
+            delegate_to: localhost
+        
+          - name: "Step 8d): Check applicable login page (retry) - {{ os_service_login_check_url }}"
+            uri:
+              url: "{{ os_service_login_check_url }}"
+              method: GET
+              return_content: yes
+              follow_redirects: all
+              timeout: 90
+              status_code: 200
+            register: http_resp_login_check
+            delegate_to: localhost
+
+          - name: "Step 8e) Result for login page check (retry) - status of 200 is what we want"
+            debug:
+              msg: "URL: {{ http_resp_login_check.url }} - HTTP Status: {{ http_resp_login_check.status }}"      
+
+        rescue:      
+          - set_fact: http_resp_login_check="{{ http_resp_login_check | replace('\\r\\n','') }}"
+      
+          - name: "Step 8f) Error handling for when login page check fails twice - sending eMail"
+            include_role:
+              name: send_email
+            vars: 
+              email_subject: "{{ sr_email_obj.subject }}"
+              email_body: "{{ sr_email_obj.body }}<br/>The login page check failed - <b>Restart has concluded but manual checks should be made</b><br/><br/>Error details:<br/><br/><pre>{{ http_resp_login_check | to_nice_json }}</pre>"
+              email_to: "{{ sr_email_obj.to }}"
+              email_level: error
+              email_subtype: "{{ sr_email_obj.subtype }}"
+            when: sr_email_obj is defined  
+        when: true          
+            
+    when: (os_service_login_check_url is defined) and (os_service_login_check_url != "null") and (os_service_login_check_url|length > 0)
