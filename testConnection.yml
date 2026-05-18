@@ -1,0 +1,474 @@
+---
+- name: testConnection
+  hosts: "{{ host_filter }}"
+  gather_facts: false
+
+  tasks:
+    - name: Ping target host
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Show success message
+      ansible.builtin.debug:
+        msg: "success"
+      when: ping_result.ping == 'pong'
+
+    - name: Check for Java processes
+      ansible.builtin.shell: "ps -ef | grep java"
+      register: ps_result
+      changed_when: false
+
+    - name: Show Java process output
+      ansible.builtin.debug:
+        var: ps_result.stdout_lines
+
+    - name: Check jasperserver status
+      ansible.builtin.shell: "systemctl status jasperserver"
+      register: status_result
+      become: yes
+      changed_when: false
+      failed_when: false
+
+    - name: Show jasperserver status
+      ansible.builtin.debug:
+        var: status_result.stdout_lines
+
+    - name: Stop jasperserver service
+      ansible.builtin.shell: "systemctl stop jasperserver"
+      become: yes
+      register: stop_result
+      failed_when: false
+
+    - name: Show stop command result
+      ansible.builtin.debug:
+        var: stop_result.stdout_lines
+
+    - name: Check jasperserver status after stop
+      ansible.builtin.shell: "systemctl status jasperserver"
+      register: status_after_stop
+      become: yes
+      changed_when: false
+      failed_when: false
+
+    - name: Show success if service inactive
+      ansible.builtin.debug:
+        msg: "successfully stopped"
+      when: "'inactive' in status_after_stop.stdout"
+
+    - name: Show jasperserver-pro  status after stop
+      ansible.builtin.debug:
+        var: status_after_stop.stdout_lines
+      when: "'inactive' not in status_after_stop.stdout"
+
+    - name: Switch to jasper user and verify
+      ansible.builtin.shell: 'su - jasper -c "whoami"'
+      become: yes
+      register: su_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show su result
+      ansible.builtin.debug:
+        var: su_result.stdout
+
+- name: Create jasper archive and back up tomcat
+  hosts: "{{ host_filter }}"
+  become: yes
+  vars:
+    jasper_base: /u01/app/jasper
+    jasper_release_dir: jasperreports-server-9.0.0
+
+  tasks:
+    # zip is assumed present on the host; no installation step required
+
+    # the following operations will run unconditionally
+
+
+    - name: Ensure jasper base directory exists
+      file:
+        path: "{{ jasper_base }}"
+        state: directory
+        mode: '0755'
+
+    - name: List contents of jasper base
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ jasper_base }}"
+      become_user: jasper
+      register: ls_before
+
+    - name: Show listing before operations
+      ansible.builtin.debug:
+        var: ls_before.stdout_lines
+
+    - name: Check jasper release directory exists
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      register: jasper_release_dir_stat
+      become_user: jasper
+
+    - name: Fail if jasper release directory is missing
+      ansible.builtin.fail:
+        msg: "Release directory {{ jasper_base }}/{{ jasper_release_dir }} does not exist"
+      when: not jasper_release_dir_stat.stat.exists
+
+    - name: Set backup date stamp
+      ansible.builtin.shell: "date +%d%b%y | tr '[:upper:]' '[:lower:]'"
+      register: backup_date
+      changed_when: false
+      become_user: jasper
+
+    - name: Set backup name variables
+      ansible.builtin.set_fact:
+        backup_date_stamp: "{{ backup_date.stdout }}"
+        archive_name: "jasperreports-server-9.0.0_{{ backup_date.stdout }}.zip"
+        tomcat_backup_suffix: "_{{ backup_date.stdout }}"
+
+    - name: Find current tomcat directory
+      ansible.builtin.shell: "ls -d apache-tomcat* 2>/dev/null | head -1"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      register: found_tomcat_dir
+      changed_when: false
+      become_user: jasper
+      failed_when: false
+
+    - name: Set current tomcat directory name
+      ansible.builtin.set_fact:
+        current_tomcat_dir: "{{ found_tomcat_dir.stdout }}"
+        tomcat_backup_dir: "{{ found_tomcat_dir.stdout }}{{ tomcat_backup_suffix }}"
+
+    - name: Fail if no current tomcat directory exists
+      ansible.builtin.fail:
+        msg: "No apache-tomcat* directory found in {{ jasper_base }}/{{ jasper_release_dir }}"
+      when: current_tomcat_dir == ''
+
+    - name: Create zip archive of jasper release (idempotent)
+      ansible.builtin.command: "zip -r {{ archive_name }} {{ jasper_release_dir }}/"
+      args:
+        chdir: "{{ jasper_base }}"
+        creates: "{{ jasper_base }}/{{ archive_name }}"
+      become_user: jasper
+
+    - name: Notify success of archive creation
+      ansible.builtin.debug:
+        msg: "Successfully took backup"
+      when: ansible_facts is defined  # always true, used to separate tasks
+
+    - name: Copy apache-tomcat to backup name
+      ansible.builtin.command: "cp -pr {{ current_tomcat_dir }} {{ tomcat_backup_dir }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      become_user: jasper
+
+    - name: Extract apache-tomcat tarball if not already present
+      ansible.builtin.shell: "tar -zxvf /home/jasper/apache-tomcat-9.0.117.tar.gz -C ."
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+        creates: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117"
+      become_user: jasper
+
+    - name: Extract OpenJDK tarball if not already present
+      ansible.builtin.shell: "tar -zxvf /home/jasper/OpenJDK17U-jdk_x64_linux_hotspot_17.0.18_8.tar.gz -C ."
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+        creates: "{{ jasper_base }}/{{ jasper_release_dir }}/OpenJDK17U-jdk_x64_linux_hotspot_17.0.18_8"
+      become_user: jasper
+
+    - name: Copy webapps from old tomcat if missing
+      ansible.builtin.command: "cp -pr {{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/webapps/repo ."
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/webapps"
+      become_user: jasper
+      failed_when: false
+    - name: Copy webapps jrio
+      ansible.builtin.command: "cp -pr {{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/webapps/jrio ."
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/webapps"
+      become_user: jasper
+      failed_when: false
+    - name: Copy webapps jasperserver-pro
+      ansible.builtin.command: "cp -pr {{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/webapps/jasperserver-pro ."
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/webapps"
+      become_user: jasper
+      failed_when: false
+    - name: Copy scripts directory from old tomcat
+      ansible.builtin.command: "cp -pr {{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/scripts ."
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117"
+      become_user: jasper
+      register: copy_scripts_result
+      failed_when: false
+
+    - name: Check if ctl.sh exists in root scripts directory
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts/ctl.sh"
+      become_user: jasper
+      register: root_ctl_stat
+
+    - name: Backup ctl.sh in root scripts directory
+      ansible.builtin.command: "cp -p ctl.sh ctl.sh_{{ backup_date_stamp }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts"
+      become_user: jasper
+      when: root_ctl_stat.stat.exists
+      changed_when: false
+
+    - name: Update ctl.sh jdk version in root scripts directory
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts/ctl.sh"
+        regexp: 'jdk-17\.0\.14'
+        replace: 'jdk-17.0.18+8'
+      become_user: jasper
+      when: root_ctl_stat.stat.exists
+    - name: Update ctl.sh tomcat version in root scripts directory
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts/ctl.sh"
+        regexp: 'apache-tomcat-[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+\.[0-9]+\.[0-9]+)?([/a-zA-Z0-9._-]*)'
+        replace: 'apache-tomcat-9.0.117\2'
+      become_user: jasper
+      when: root_ctl_stat.stat.exists
+
+    - name: Check if setenv.sh exists in root scripts directory
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts/setenv.sh"
+      become_user: jasper
+      register: root_setenv_stat
+
+    - name: Backup setenv.sh in root scripts directory
+      ansible.builtin.command: "cp -p setenv.sh setenv.sh_{{ backup_date_stamp }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts"
+      become_user: jasper
+      when: root_setenv_stat.stat.exists
+      changed_when: false
+
+    - name: Debug setenv.sh content before replacement
+      ansible.builtin.shell: "grep -n 'apache-tomcat' {{ jasper_base }}/{{ jasper_release_dir }}/scripts/setenv.sh || echo 'No apache-tomcat found'"
+      become_user: jasper
+      register: setenv_before
+      when: root_setenv_stat.stat.exists
+      changed_when: false
+
+    - name: Show setenv.sh content before replacement
+      ansible.builtin.debug:
+        var: setenv_before.stdout_lines
+      when: root_setenv_stat.stat.exists
+
+    - name: Update setenv.sh tomcat version in root scripts directory
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts/setenv.sh"
+        regexp: 'apache-tomcat-[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+\.[0-9]+\.[0-9]+)?([/a-zA-Z0-9._-]*)'
+        replace: 'apache-tomcat-9.0.117\2'
+      become_user: jasper
+      when: root_setenv_stat.stat.exists
+
+    - name: Cleanup stray dash after tomcat version in setenv.sh
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts/setenv.sh"
+        regexp: 'apache-tomcat-9.0.117-+'
+        replace: 'apache-tomcat-9.0.117'
+      become_user: jasper
+      when: root_setenv_stat.stat.exists
+
+    - name: Debug setenv.sh content after replacement
+      ansible.builtin.shell: "grep -n 'apache-tomcat' {{ jasper_base }}/{{ jasper_release_dir }}/scripts/setenv.sh || echo 'No apache-tomcat found'"
+      become_user: jasper
+      register: setenv_after
+      when: root_setenv_stat.stat.exists
+      changed_when: false
+
+    - name: Show setenv.sh content after replacement
+      ansible.builtin.debug:
+        var: setenv_after.stdout_lines
+      when: root_setenv_stat.stat.exists
+
+    - name: Update setenv.sh jdk version in root scripts directory
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/scripts/setenv.sh"
+        regexp: 'jdk-17\.0\.14'
+        replace: 'jdk-17.0.18+8'
+      become_user: jasper
+      when: root_setenv_stat.stat.exists
+
+    - name: Check if ctlscript.sh exists
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/ctlscript.sh"
+      become_user: jasper
+      register: ctlscript_stat
+
+    - name: Backup ctlscript.sh
+      ansible.builtin.command: "cp -p ctlscript.sh ctlscript.sh_{{ backup_date_stamp }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      become_user: jasper
+      when: ctlscript_stat.stat.exists
+      changed_when: false
+
+    - name: Debug ctlscript.sh content before replacement
+      ansible.builtin.shell: "grep -n 'apache-tomcat' {{ jasper_base }}/{{ jasper_release_dir }}/ctlscript.sh || echo 'No apache-tomcat found'"
+      become_user: jasper
+      register: ctlscript_before
+      when: ctlscript_stat.stat.exists
+      changed_when: false
+
+    - name: Show ctlscript.sh content before replacement
+      ansible.builtin.debug:
+        var: ctlscript_before.stdout_lines
+      when: ctlscript_stat.stat.exists
+
+    - name: Update ctlscript.sh tomcat path
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/ctlscript.sh"
+        regexp: 'apache-tomcat-[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+\.[0-9]+\.[0-9]+)?([/a-zA-Z0-9._-]*)'
+        replace: 'apache-tomcat-9.0.117\2'
+      become_user: jasper
+      when: ctlscript_stat.stat.exists
+
+    - name: Debug ctlscript.sh content after replacement
+      ansible.builtin.shell: "grep -n 'apache-tomcat' {{ jasper_base }}/{{ jasper_release_dir }}/ctlscript.sh || echo 'No apache-tomcat found'"
+      become_user: jasper
+      register: ctlscript_after
+      when: ctlscript_stat.stat.exists
+      changed_when: false
+
+    - name: Show ctlscript.sh content after replacement
+      ansible.builtin.debug:
+        var: ctlscript_after.stdout_lines
+      when: ctlscript_stat.stat.exists
+
+    - name: Copy setenv.sh from old tomcat bin
+      ansible.builtin.copy:
+        src: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/bin/setenv.sh"
+        dest: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/bin/setenv.sh"
+        remote_src: yes
+        mode: '0755'
+      become_user: jasper
+      register: setenv_copy_result
+
+    - name: Update new setenv.sh jdk version
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/bin/setenv.sh"
+        regexp: 'jdk-17\.0\.14'
+        replace: 'jdk-17.0.18+8'
+      become_user: jasper
+      when: setenv_copy_result.changed
+    - name: Update new setenv.sh tomcat path
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/bin/setenv.sh"
+        regexp: 'apache-tomcat-[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+\.[0-9]+\.[0-9]+)?([/a-zA-Z0-9._-]*)'
+        replace: 'apache-tomcat-9.0.117\2'
+      become_user: jasper
+      when: setenv_copy_result.changed
+
+    - name: Cleanup stray dash after tomcat version in new setenv.sh
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/bin/setenv.sh"
+        regexp: 'apache-tomcat-9.0.117-+'
+        replace: 'apache-tomcat-9.0.117'
+      become_user: jasper
+      when: setenv_copy_result.changed
+
+    - name: Copy jmxremote.access
+      ansible.builtin.copy:
+        src: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/conf/jmxremote.access"
+        dest: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/conf/jmxremote.access"
+        remote_src: yes
+        mode: '0644'
+      become_user: jasper
+      register: jmxremote_access_result
+    - name: Copy jmxremote.password
+      ansible.builtin.copy:
+        src: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/conf/jmxremote.password"
+        dest: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/conf/jmxremote.password"
+        remote_src: yes
+        mode: '0600'
+      become_user: jasper
+      register: jmxremote_password_result
+    - name: Copy server.xml
+      ansible.builtin.copy:
+        src: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/conf/server.xml"
+        dest: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/conf/server.xml"
+        remote_src: yes
+        mode: '0600'
+      become_user: jasper
+      register: server_xml_result
+
+    - name: Copy JDBC and library jars from old tomcat
+      ansible.builtin.copy:
+        src: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/lib/{{ item }}"
+        dest: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/lib/{{ item }}"
+        remote_src: yes
+        mode: '0644'
+      loop:
+        - postgresql-42.5.4.jar
+        - mariadb-java-client-2.5.4.jar
+        - fonts-extension.jar
+        - ojdbc8-19.3.0.0.jar
+      become_user: jasper
+      ignore_errors: true
+      register: jar_copy_result
+
+    - name: Copy ctl.sh from backup to new apache-tomcat-9.0.117/scripts
+      ansible.builtin.copy:
+        src: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ tomcat_backup_dir }}/scripts/ctl.sh"
+        dest: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/scripts/ctl.sh"
+        remote_src: yes
+        mode: '0755'
+      become_user: jasper
+      register: ctl_copy_result
+
+    - name: Stat new apache-tomcat ctl.sh
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/scripts/ctl.sh"
+      become_user: jasper
+      register: new_ctl_stat
+
+    - name: Backup ctl.sh in new apache-tomcat-9.0.117/scripts
+      ansible.builtin.command: "cp -p ctl.sh ctl.sh_{{ backup_date_stamp }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/scripts"
+      become_user: jasper
+      when: new_ctl_stat.stat.exists
+      changed_when: false
+
+    - name: Update ctl.sh in apache-tomcat-9.0.117/scripts jdk version
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/scripts/ctl.sh"
+        regexp: 'jdk-17\.0\.14'
+        replace: 'jdk-17.0.18+8'
+      become_user: jasper
+      when: new_ctl_stat.stat.exists
+
+    - name: Update ctl.sh in apache-tomcat-9.0.117/scripts tomcat version
+      ansible.builtin.replace:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/apache-tomcat-9.0.117/scripts/ctl.sh"
+        regexp: 'apache-tomcat-[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+\.[0-9]+\.[0-9]+)?([/a-zA-Z0-9._-]*)'
+        replace: 'apache-tomcat-9.0.117\2'
+      become_user: jasper
+      when: new_ctl_stat.stat.exists
+
+    - name: Report copy operation results
+      ansible.builtin.debug:
+        msg: |
+          === File Copy Operations Summary ===
+          Root ctl.sh found: {{ 'YES' if root_ctl_stat.stat.exists else 'NO' }}
+          ctlscript.sh found: {{ 'YES' if ctlscript_stat.stat.exists else 'NO' }}
+          setenv.sh copy: {{ 'OK' if setenv_copy_result.changed else 'FAILED or skipped' }}
+          jmxremote.access copy: {{ 'OK' if jmxremote_access_result.changed is defined and jmxremote_access_result.changed else 'FAILED or skipped' }}
+          jmxremote.password copy: {{ 'OK' if jmxremote_password_result.changed is defined and jmxremote_password_result.changed else 'FAILED or skipped' }}
+          ctl.sh copy (to apache-tomcat): {{ 'OK' if ctl_copy_result.changed else 'FAILED or skipped' }}
+          JAR files copy: {{ jar_copy_result.results | selectattr('failed', 'equalto', False) | list | length }} succeeded
+
+    - name: List jasper release directory after operations
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      become_user: jasper
+      register: ls_after
+
+    - name: Show listing after operations
+      ansible.builtin.debug:
+        var: ls_after.stdout_lines
+
