@@ -1,0 +1,113 @@
+---
+- name: jdkupdateforhcomm
+  hosts: "{{ host_filter }}"
+  gather_facts: false
+
+  tasks:
+    - name: Ping target host
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Show success message
+      ansible.builtin.debug:
+        msg: "success"
+      when: ping_result.ping == 'pong'
+
+    - name: Check for Java processes
+      ansible.builtin.shell: "ps -ef | grep java"
+      register: ps_result
+      changed_when: false
+
+    - name: Show Java process output
+      ansible.builtin.debug:
+        var: ps_result.stdout_lines
+
+    - name: Switch to hcomm user and verify
+      ansible.builtin.shell: 'su - hcomm -c "whoami"'
+      become: yes
+      register: su_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show su result
+      ansible.builtin.debug:
+        var: su_result.stdout
+
+- name: unzip JDK and back up hcomm
+  hosts: "{{ host_filter }}"
+  become: yes
+  vars:
+    jdk_base: "{{ hc_base }}/java"
+    hcomm_instance_dir: "{{ hc_base }}/hcomm/hconnect"
+
+  tasks:
+    # zip is assumed present on the host; no installation step required
+
+    # the following operations will run unconditionally
+
+
+    - name: Ensure jdk base directory exists
+      file:
+        path: "{{ jdk_base }}"
+        state: directory
+        mode: '0755'
+
+    - name: List contents of hcomm base
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ jdk_base }}"
+      become_user: hcomm
+      register: ls_before
+
+    - name: Show listing before operations
+      ansible.builtin.debug:
+        var: ls_before.stdout_lines
+
+    - name: Check hcomm instance directory exists
+      ansible.builtin.stat:
+        path: "{{ hcomm_instance_dir }}"
+      register: hcomm_instance_dir_stat
+      become_user: hcomm
+
+    - name: Fail if hcomm instance directory is missing
+      ansible.builtin.fail:
+        msg: "instance directory {{ hcomm_instance_dir }} does not exist"
+      when: not hcomm_instance_dir_stat.stat.exists
+
+      
+    - name: Extract tar archive
+      ansible.builtin.unarchive:
+        src: /home/hcomm/OpenJDK17U-jdk_x64_linux_hotspot_17.0.19_10.tar.gz
+        dest: "{{ jdk_base }}"
+        remote_src: yes
+      become_user: hcomm
+
+    
+    - name: Check if hcommservice.sh exists
+      ansible.builtin.stat:
+        path: "{{ hcomm_instance_dir }}/hcommservice.sh"
+      register: root_setenv_stat
+      become: yes
+      become_user: hcomm
+       
+    - name: Update setenv.sh jdk version in hcomm bin directory
+      ansible.builtin.replace:
+        path: "{{ hcomm_instance_dir }}/hcommservice.sh"
+        regexp: 'jdk-17.0.18+8'
+        replace: 'jdk-17.0.19+10'
+        backup: yes
+      become: yes
+      become_user: hcomm
+      when: root_setenv_stat.stat.exists
+
+    - name: List hcomm instance directory after operations
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ hcomm_instance_dir }}"
+      become_user: hcomm
+      register: ls_after
+
+    - name: Show listing after operations
+      ansible.builtin.debug:
+        var: ls_after.stdout_lines
+
