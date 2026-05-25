@@ -93,7 +93,7 @@
     - name: Update setenv.sh jdk version in hcomm bin directory
       ansible.builtin.replace:
         path: "{{ hcomm_instance_dir }}/hcommservice.sh"
-        regexp: 'jdk-17.0.18+8'
+        regexp: 'jdk-17\.0\.[0-9]+\+[0-9]+'
         replace: 'jdk-17.0.19+10'
         backup: yes
       become: yes
