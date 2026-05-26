@@ -14,10 +14,10 @@
       when: ping_result.ping == 'pong'
 
     - name: Check Java processes
-  	ansible.builtin.shell: "pgrep -fl java"
-  	register: ps_result
-  	changed_when: false
-  	failed_when: false
+      ansible.builtin.shell: "pgrep -fl java"
+      register: ps_result
+      changed_when: false
+      failed_when: false
 
     - name: Show Java process output
       ansible.builtin.debug:
