@@ -165,7 +165,7 @@
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
-      loop: "{{ file_content.content | b64decode | split('\n') }}"
+      loop: "{{ (file_content.content | b64decode).splitlines() }}"
 
     - name: Ensure destination directory exists
       ansible.builtin.file:
