@@ -1,0 +1,334 @@
+---
+- name: testConnection
+  hosts: "{{ host_filter }}"
+  gather_facts: false
+
+  tasks:
+    - name: Ping target host
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Show success message
+      ansible.builtin.debug:
+        msg: "success"
+      when: ping_result.ping == 'pong'
+
+    - name: Check for Java processes
+      ansible.builtin.shell: "ps -ef | grep java"
+      register: ps_result
+      changed_when: false
+
+    - name: Show Java process output
+      ansible.builtin.debug:
+        var: ps_result.stdout_lines
+
+    - name: Check jasperserver status
+      ansible.builtin.shell: "systemctl status jasperserver"
+      register: status_result
+      become: yes
+      changed_when: false
+      failed_when: false
+
+    - name: Show jasperserver status
+      ansible.builtin.debug:
+        var: status_result.stdout_lines
+
+    - name: Stop jasperserver service
+      ansible.builtin.shell: "systemctl stop jasperserver"
+      become: yes
+      register: stop_result
+      failed_when: false
+
+    - name: Show stop command result
+      ansible.builtin.debug:
+        var: stop_result.stdout_lines
+
+    - name: Check jasperserver status after stop
+      ansible.builtin.shell: "systemctl status jasperserver"
+      register: status_after_stop
+      become: yes
+      changed_when: false
+      failed_when: false
+
+    - name: Show success if service inactive
+      ansible.builtin.debug:
+        msg: "successfully stopped"
+      when: "'inactive' in status_after_stop.stdout"
+
+    - name: Show jasperserver-pro  status after stop
+      ansible.builtin.debug:
+        var: status_after_stop.stdout_lines
+      when: "'inactive' not in status_after_stop.stdout"
+
+    - name: Switch to jasper user and verify
+      ansible.builtin.shell: 'su - jasper -c "whoami"'
+      become: yes
+      register: su_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show su result
+      ansible.builtin.debug:
+        var: su_result.stdout
+
+- name: Create jasper archive and back up tomcat
+  hosts: "{{ host_filter }}"
+  become: yes
+  vars_files:
+    - home/jasper/scripts/jasper-hotfix-files.yml
+  vars:
+    jasper_base: /u01/app/jasper
+    jasper_release_dir: jasperreports-server-9.0.0
+    target_tomcat_dir: apache-tomcat-9.0.118
+
+  tasks:
+    # zip is assumed present on the host; no installation step required
+
+    # the following operations will run unconditionally
+
+
+    - name: Ensure jasper base directory exists
+      file:
+        path: "{{ jasper_base }}"
+        state: directory
+        mode: '0755'
+
+    - name: List contents of jasper base
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ jasper_base }}"
+      become_user: jasper
+      register: ls_before
+
+    - name: Show listing before operations
+      ansible.builtin.debug:
+        var: ls_before.stdout_lines
+
+    - name: Check jasper release directory exists
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      register: jasper_release_dir_stat
+      become_user: jasper
+
+    - name: Fail if jasper release directory is missing
+      ansible.builtin.fail:
+        msg: "Release directory {{ jasper_base }}/{{ jasper_release_dir }} does not exist"
+      when: not jasper_release_dir_stat.stat.exists
+
+    - name: Set backup date stamp
+      ansible.builtin.shell: "date +%d%b%y | tr '[:upper:]' '[:lower:]'"
+      register: backup_date
+      changed_when: false
+      become_user: jasper
+
+    - name: Set backup name variables
+      ansible.builtin.set_fact:
+        backup_date_stamp: "{{ backup_date.stdout }}"
+        archive_name: "jasperreports-server-9.0.0_AfterUpgrade{{ backup_date.stdout }}.zip"
+        tomcat_backup_suffix: "_{{ backup_date.stdout }}"
+    
+    - name: Find current tomcat directory
+      ansible.builtin.shell: "ls -d apache-tomcat* 2>/dev/null | head -1"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      register: found_tomcat_dir
+      changed_when: false
+      become_user: jasper
+      failed_when: false
+
+    - name: Set current tomcat directory name
+      ansible.builtin.set_fact:
+        current_tomcat_dir: "{{ found_tomcat_dir.stdout }}"
+        tomcat_backup_dir: "{{ found_tomcat_dir.stdout }}{{ tomcat_backup_suffix }}"
+
+    - name: Fail if no current tomcat directory exists
+      ansible.builtin.fail:
+        msg: "No apache-tomcat* directory found in {{ jasper_base }}/{{ jasper_release_dir }}"
+      when: current_tomcat_dir == ''
+
+    - name: Create zip archive of jasper release (idempotent)
+      ansible.builtin.command: "zip -r {{ archive_name }} {{ jasper_release_dir }}/"
+      args:
+        chdir: "{{ jasper_base }}"
+        creates: "{{ jasper_base }}/{{ archive_name }}"
+      become_user: jasper
+
+    - name: Notify success of archive creation
+      ansible.builtin.debug:
+        msg: "Successfully took backup"
+      when: ansible_facts is defined  # always true, used to separate tasks
+
+    - name: Change to WEB-INF directory and list js.quartz files
+      ansible.builtin.shell: ls -lrt js.quartz.*
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF"
+      become_user: jasper
+      register: quartz_ls_result
+      failed_when: false
+
+    - name: Show js.quartz files
+      ansible.builtin.debug:
+        var: quartz_ls_result.stdout_lines
+
+    - name: Backup js.quartz.properties with date stamp
+      ansible.builtin.shell: "cp -p js.quartz.properties js.quartz.properties_{{ backup_date.stdout }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF"
+      become_user: jasper
+      register: quartz_backup_result
+      failed_when: false
+
+    - name: Show quartz backup result
+      ansible.builtin.debug:
+        msg: "Quartz backup rc: {{ quartz_backup_result.rc }}"
+
+    - name: Verify quartz backup file exists
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF/js.quartz.properties_{{ backup_date.stdout }}"
+      register: quartz_backup_verify
+
+    - name: Show quartz backup verification
+      ansible.builtin.debug:
+        msg: "Quartz backup file exists: {{ quartz_backup_verify.stat.exists }}"
+
+    - name: List js.config.properties files
+      ansible.builtin.shell: ls -lrt js.config.properties*
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF"
+      become_user: jasper
+      register: config_ls_result
+      failed_when: false
+
+    - name: Show js.config.properties files
+      ansible.builtin.debug:
+        var: config_ls_result.stdout_lines
+
+    - name: Backup js.config.properties with date stamp
+      ansible.builtin.shell: "cp -p js.config.properties js.config.properties_{{ backup_date.stdout }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF"
+      become_user: jasper
+      register: config_backup_result
+      failed_when: false
+
+    - name: Show config backup result
+      ansible.builtin.debug:
+        msg: "Config backup rc: {{ config_backup_result.rc }}"
+
+    - name: Verify config backup file exists
+      ansible.builtin.stat:
+        path: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF/js.config.properties_{{ backup_date.stdout }}"
+      register: config_backup_verify
+
+    - name: Show config backup verification
+      ansible.builtin.debug:
+        msg: "Config backup file exists: {{ config_backup_verify.stat.exists }}"
+
+    - name: Log hotfix removal patterns
+      ansible.builtin.debug:
+        msg: "Removing hotfix pattern: {{ item }}"
+      loop: "{{ files_to_remove_exact }}"
+      loop_control:
+        label: "{{ item }}"
+      when: files_to_remove_exact | length > 0
+
+    - name: Remove hotfix files from jasperserver-pro
+      ansible.builtin.shell: "rm -f {{ item }}"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro"
+      become_user: jasper
+      register: remove_results
+      failed_when: false
+      loop: "{{ files_to_remove_exact }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Show hotfix removal results
+      ansible.builtin.debug:
+        var: remove_results.results
+      when: files_to_remove_exact | length > 0
+
+    - name: Show archive created
+      ansible.builtin.debug:
+        msg: "Created archive {{ jasper_base }}/{{ archive_name }}"
+
+    - name: List jasper release directory after operations
+      ansible.builtin.shell: ls -lrt
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}"
+      become_user: jasper
+      register: ls_after
+
+    - name: Show listing after operations
+      ansible.builtin.debug:
+        var: ls_after.stdout_lines
+    
+    - name: Unzip jasperserver-pro.zip from new_hotfix directory
+      ansible.builtin.shell: "unzip -o jasperserver-pro.zip -d /u01/app/jasper/jasperreports-server-9.0.0/{{ target_tomcat_dir }}/webapps/jasperserver-pro/"
+      args:
+        chdir: "/home/jasper/hotfix"
+      become_user: jasper
+      register: unzip_result
+      failed_when: false
+
+    - name: Show unzip result
+      ansible.builtin.debug:
+        msg: "Unzip rc: {{ unzip_result.rc }}, stdout: {{ unzip_result.stdout }}"
+
+    - name: Restore js.quartz.properties from latest backup
+      ansible.builtin.shell: "cp -pr js.quartz.properties_latest_backup js.quartz.properties"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF"
+      become_user: jasper
+      register: quartz_restore_result
+      failed_when: false
+
+    - name: Show quartz restore result
+      ansible.builtin.debug:
+        msg: "Quartz restore rc: {{ quartz_restore_result.rc }}"
+
+    - name: List js.config.properties files
+      ansible.builtin.shell: ls -lrt js.config.properties*
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF"
+      become_user: jasper
+      register: config_ls_after
+      failed_when: false
+
+    - name: Show config files after restore
+      ansible.builtin.debug:
+        var: config_ls_after.stdout_lines
+
+    - name: Restore js.config.properties from latest backup
+      ansible.builtin.shell: "cp -pr js.config.properties_latest_backup js.config.properties"
+      args:
+        chdir: "{{ jasper_base }}/{{ jasper_release_dir }}/{{ target_tomcat_dir }}/webapps/jasperserver-pro/WEB-INF"
+      become_user: jasper
+      register: config_restore_result
+      failed_when: false
+
+    - name: Show config restore result
+      ansible.builtin.debug:
+        msg: "Config restore rc: {{ config_restore_result.rc }}"
+
+    #- name: Start jasperserver service
+    #  ansible.builtin.shell: "systemctl start jasperserver"
+    #  become: yes
+    #  register: start_result
+    #  failed_when: false
+
+    #- name: Show start result
+    #  ansible.builtin.debug:
+    #    msg: "Start jasperserver rc: {{ start_result.rc }}"
+
+    - name: Check jasperserver status after start
+      ansible.builtin.shell: "systemctl status jasperserver"
+      become: yes
+      register: status_after_start
+      changed_when: false
+      failed_when: false
+
+    - name: Show jasperserver status
+      ansible.builtin.debug:
+        var: status_after_start.stdout_lines
+
