@@ -475,7 +475,7 @@
 
     - name: Extract zip file
       ansible.builtin.unarchive:
-        src: /home/jasper/new_hotfix/jasperserver-pro.zip
+        src: /home/jasper/hotfix/jasperserver-pro.zip
         dest: /u01/app/jasper/jasperreports-server-9.0.0/apache-tomcat-9.0.118/webapps/jasperserver-pro
         remote_src: yes
         extra_opts: ["-o"]
