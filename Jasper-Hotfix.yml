@@ -75,7 +75,7 @@
   hosts: "{{ host_filter }}"
   become: yes
   vars_files:
-    - home/jasper/scripts/jasper-hotfix-files.yml
+    - file_vars/jasper-hotfix-files.yml
   vars:
     jasper_base: /u01/app/jasper
     jasper_release_dir: jasperreports-server-9.0.0
