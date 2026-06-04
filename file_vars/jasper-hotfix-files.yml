@@ -73,9 +73,9 @@ files_to_remove_exact:
 - "WEB-INF/lib/jasperreports-server-data-adapter-*.jar"
 - "WEB-INF/lib/jasperreports-tibco-jdbc-*.jar"
 - "WEB-INF/lib/jasperreports-tibcomaps-*.jar"
-- "WEB-INF/applicationContext-ftpserver.xml
-- "WEB-INF/flows/generalSettingsBeans.xml
-- "WEB-INF/flows/generalSettingsFlow.xml
+- "WEB-INF/applicationContext-ftpserver.xml"
+- "WEB-INF/flows/generalSettingsBeans.xml"
+- "WEB-INF/flows/generalSettingsFlow.xml"
 - "WEB-INF/lib/accessors-smart-2.5.0.jar"
 - "WEB-INF/lib/activemq-broker-5.16.7.jar"
 - "WEB-INF/lib/activemq-client-5.16.7.jar"
