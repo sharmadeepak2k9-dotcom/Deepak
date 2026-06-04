@@ -158,7 +158,7 @@
 
     - name: Find old jars
       find:
-        paths: /u01/app/jasper/jasperreports-server-9.0.0/apache-tomcat-9.0.117/webapps/jasperserver-pro/WEB-INF/lib
+        paths: /u01/app/jasper/jasperreports-server-9.0.0/apache-tomcat-9.0.118/webapps/jasperserver-pro/WEB-INF/lib
         patterns:
           - "spring-aop-5.*.jar"
           - "spring-beans-5.*.jar"
@@ -467,7 +467,7 @@
 
     - name: Ensure destination directory exists
       ansible.builtin.file:
-        path: /u01/app/jasper/jasperreports-server-9.0.0/apache-tomcat-9.0.117/webapps/jasperserver-pro
+        path: /u01/app/jasper/jasperreports-server-9.0.0/apache-tomcat-9.0.118/webapps/jasperserver-pro
         state: directory
         mode: '0755'
         owner: jasper
@@ -476,7 +476,7 @@
     - name: Extract zip file
       ansible.builtin.unarchive:
         src: /home/jasper/new_hotfix/jasperserver-pro.zip
-        dest: /u01/app/jasper/jasperreports-server-9.0.0/apache-tomcat-9.0.117/webapps/jasperserver-pro
+        dest: /u01/app/jasper/jasperreports-server-9.0.0/apache-tomcat-9.0.118/webapps/jasperserver-pro
         remote_src: yes
         extra_opts: ["-o"]
       become_user: jasper
