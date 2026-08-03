@@ -42,13 +42,14 @@
 
   vars:
     tcserver_user: tcserver
+    tcserver_service_name: tcServer
 
-    old_jdk_version: "jdk8u472-b08"
-    new_jdk_version: "jdk8u482-b08"
+    old_jdk_version: "jdk8u{{oldjdk}}-{{oldbd}}"
+    new_jdk_version: "jdk8u{{newjdk}}-{{newbd}}"
 
-    expected_java_version: "1.8.0_482"
+    expected_java_version: "1.8.0_{{newjdk}}"
 
-    jdk_archive: "/home/tcserver/OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz"
+    jdk_archive: "/home/tcserver/OpenJDK8U-jdk_x64_linux_hotspot_8u{{newjdk}}{{newjdk}}.tar.gz"
 
     jdk_base: "{{ tc_base }}/java"
     tcserver_instance_dir: "{{ tc_base }}/tcserver/pivotal-tc-server/instances/nexlynkdms"
@@ -83,9 +84,7 @@
 
     - name: Fail if tcServer instance directory is missing
       ansible.builtin.fail:
-        msg: >
-          tcServer instance directory not found:
-          {{ tcserver_instance_dir }}
+        msg: "tcServer instance directory not found: {{ tcserver_instance_dir }}"
       when: not tcserver_dir.stat.exists
 
     - name: Verify JDK archive exists
@@ -106,6 +105,16 @@
         creates: "{{ jdk_base }}/{{ new_jdk_version }}"
       become_user: "{{ tcserver_user }}"
 
+    - name: Verify extracted JDK directory exists
+      ansible.builtin.stat:
+        path: "{{ jdk_base }}/{{ new_jdk_version }}"
+      register: extracted_jdk
+
+    - name: Fail if extracted JDK directory is missing
+      ansible.builtin.fail:
+        msg: "Expected extracted JDK directory not found: {{ jdk_base }}/{{ new_jdk_version }}"
+      when: not extracted_jdk.stat.exists
+
     - name: Verify setenv.sh exists
       ansible.builtin.stat:
         path: "{{ setenv_file }}"
@@ -119,56 +128,70 @@
     - name: Update JDK version in setenv.sh
       ansible.builtin.replace:
         path: "{{ setenv_file }}"
-        regexp: "{{ old_jdk_version }}"
+        regexp: "{{ old_jdk_version | regex_escape }}"
         replace: "{{ new_jdk_version }}"
         backup: true
       register: setenv_update
 
     - name: Display update status
       ansible.builtin.debug:
-        msg: >-
-          JDK reference updated in setenv.sh: {{ setenv_update.changed }}
+        msg: "JDK reference updated in setenv.sh: {{ setenv_update.changed }}"
+
+    - name: Display backup file
+      ansible.builtin.debug:
+        msg: "Backup created: {{ setenv_update.backup_file }}"
+      when:
+        - setenv_update.changed
+        - setenv_update.backup_file is defined
 
     ###########################################################################
-    # Restart only when configuration changed
+    # Restart tcServer only if JDK reference changed
     ###########################################################################
 
     - name: Restart tcServer after JDK update
       when: setenv_update.changed
       block:
 
-        - name: Stop tcServer
-          ansible.builtin.shell: |
-            {{ tcserver_instance_dir }}/bin/tcruntime-ctl.sh stop
-          become_user: "{{ tcserver_user }}"
+        - name: Stop tcServer service
+          ansible.builtin.command: systemctl stop {{ tcserver_service_name }}
           register: stop_result
-          changed_when: true
 
-        - name: Wait for tcServer to stop
-          ansible.builtin.shell: |
-            pgrep -af "{{ tcserver_instance_dir }}" || true
-          register: stop_check
+        - name: Verify tcServer service is stopped
+          ansible.builtin.command: systemctl is-active {{ tcserver_service_name }}
+          register: stop_status
+          changed_when: false
+          failed_when: stop_status.stdout not in ['inactive', 'failed']
+
+        - name: Start tcServer service
+          ansible.builtin.command: systemctl start {{ tcserver_service_name }}
+          register: start_result
+
+        - name: Wait for tcServer service to become active
+          ansible.builtin.command: systemctl is-active {{ tcserver_service_name }}
+          register: start_status
           retries: 12
           delay: 10
-          until: stop_check.stdout == ""
+          until: start_status.stdout == "active"
           changed_when: false
-
-        - name: Start tcServer
-          ansible.builtin.shell: |
-            {{ tcserver_instance_dir }}/bin/tcruntime-ctl.sh start
-          become_user: "{{ tcserver_user }}"
-          register: start_result
-          changed_when: true
 
         - name: Wait for application startup
           ansible.builtin.pause:
             seconds: 30
 
-        - name: Verify tcServer Java process is running
-          ansible.builtin.shell: |
-            pgrep -af java
+        - name: Display tcServer service status
+          ansible.builtin.command: systemctl status {{ tcserver_service_name }} --no-pager
+          register: service_status
+          changed_when: false
+
+        - name: Display service status output
+          ansible.builtin.debug:
+            var: service_status.stdout_lines
+
+        - name: Verify Java processes are running
+          ansible.builtin.shell: pgrep -af java
           register: tcserver_process_check
           changed_when: false
+          failed_when: false
 
         - name: Display running Java processes
           ansible.builtin.debug:
@@ -177,21 +200,32 @@
         - name: Assert tcServer started successfully
           ansible.builtin.assert:
             that:
+              - start_status.stdout == "active"
               - tcserver_process_check.stdout != ""
             fail_msg: "tcServer restart failed."
             success_msg: "tcServer restarted successfully."
 
       rescue:
 
-        - name: Display stop output
+        - name: Display stop result
           ansible.builtin.debug:
-            var: stop_result.stdout_lines
+            var: stop_result
           when: stop_result is defined
 
-        - name: Display start output
+        - name: Display start result
           ansible.builtin.debug:
-            var: start_result.stdout_lines
+            var: start_result
           when: start_result is defined
+
+        - name: Capture failed service status
+          ansible.builtin.command: systemctl status {{ tcserver_service_name }} --no-pager
+          register: failed_service_status
+          changed_when: false
+          failed_when: false
+
+        - name: Display failed service status
+          ansible.builtin.debug:
+            var: failed_service_status.stdout_lines
 
         - name: Fail restart process
           ansible.builtin.fail:
@@ -202,8 +236,8 @@
     ###########################################################################
 
     - name: Verify setenv.sh contains new JDK version
-      ansible.builtin.shell: |
-        grep "{{ new_jdk_version }}" "{{ setenv_file }}"
+      ansible.builtin.command:
+        cmd: grep {{ new_jdk_version }} {{ setenv_file }}
       register: setenv_validation
       changed_when: false
 
