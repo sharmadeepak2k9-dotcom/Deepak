@@ -1,113 +1,247 @@
 ---
-- name: jdkupdateforapp
+- name: Pre-checks for JDK update
   hosts: "{{ host_filter }}"
   gather_facts: false
 
   tasks:
-    - name: Ping target host
+    - name: Verify host connectivity
       ansible.builtin.ping:
       register: ping_result
 
-    - name: Show success message
+    - name: Display connectivity status
       ansible.builtin.debug:
-        msg: "success"
-      when: ping_result.ping == 'pong'
+        msg: "Host is reachable"
+      when: ping_result.ping == "pong"
 
-    - name: Check for Java processes
-      ansible.builtin.shell: "ps -ef | grep java"
-      register: ps_result
-      changed_when: false
-
-    - name: Show Java process output
-      ansible.builtin.debug:
-        var: ps_result.stdout_lines
-
-    - name: Switch to tcserver user and verify
-      ansible.builtin.shell: 'su - tcserver -c "whoami"'
-      become: yes
-      register: su_result
+    - name: Check running Java processes
+      ansible.builtin.shell: pgrep -af java
+      register: java_processes
       changed_when: false
       failed_when: false
 
-    - name: Show su result
+    - name: Display Java processes
       ansible.builtin.debug:
-        var: su_result.stdout
+        var: java_processes.stdout_lines
 
-- name: Create tcserver archive and back up tomcat
+    - name: Verify tcserver user access
+      ansible.builtin.command: whoami
+      become: true
+      become_user: tcserver
+      register: tcserver_user_check
+      changed_when: false
+
+    - name: Display tcserver user validation
+      ansible.builtin.debug:
+        msg: "Executing as {{ tcserver_user_check.stdout }}"
+
+###############################################################################
+
+- name: Update JDK for tcServer
   hosts: "{{ host_filter }}"
-  become: yes
+  become: true
+
   vars:
+    tcserver_user: tcserver
+
+    old_jdk_version: "jdk8u472-b08"
+    new_jdk_version: "jdk8u482-b08"
+
+    expected_java_version: "1.8.0_482"
+
+    jdk_archive: "/home/tcserver/OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz"
+
     jdk_base: "{{ tc_base }}/java"
     tcserver_instance_dir: "{{ tc_base }}/tcserver/pivotal-tc-server/instances/nexlynkdms"
+    setenv_file: "{{ tcserver_instance_dir }}/bin/setenv.sh"
 
   tasks:
-    # zip is assumed present on the host; no installation step required
 
-    # the following operations will run unconditionally
-
-
-    - name: Ensure jdk base directory exists
-      file:
+    - name: Ensure JDK base directory exists
+      ansible.builtin.file:
         path: "{{ jdk_base }}"
         state: directory
-        mode: '0755'
+        owner: "{{ tcserver_user }}"
+        group: "{{ tcserver_user }}"
+        mode: "0755"
 
-    - name: List contents of tcserver base
-      ansible.builtin.shell: ls -lrt
+    - name: List JDK directory contents before update
+      ansible.builtin.command: ls -lrt
       args:
         chdir: "{{ jdk_base }}"
-      become_user: tcserver
+      become_user: "{{ tcserver_user }}"
       register: ls_before
+      changed_when: false
 
-    - name: Show listing before operations
+    - name: Display JDK directory contents before update
       ansible.builtin.debug:
         var: ls_before.stdout_lines
 
-    - name: Check tcserver instance directory exists
+    - name: Verify tcServer instance directory exists
       ansible.builtin.stat:
         path: "{{ tcserver_instance_dir }}"
-      register: tcserver_instance_dir_stat
-      become_user: tcserver
+      register: tcserver_dir
 
-    - name: Fail if tcserver instance directory is missing
+    - name: Fail if tcServer instance directory is missing
       ansible.builtin.fail:
-        msg: "instance directory {{ tcserver_instance_dir }} does not exist"
-      when: not tcserver_instance_dir_stat.stat.exists
+        msg: >
+          tcServer instance directory not found:
+          {{ tcserver_instance_dir }}
+      when: not tcserver_dir.stat.exists
 
-      
-    - name: Extract tar archive
-      ansible.builtin.unarchive:
-        src: /home/tcserver/OpenJDK8U-jdk_x64_linux_hotspot_8u482b08.tar.gz
-        dest: "{{ jdk_base }}"
-        remote_src: yes
-      become_user: tcserver
-
-    
-    - name: Check if setenv.sh exists
+    - name: Verify JDK archive exists
       ansible.builtin.stat:
-        path: "{{ tcserver_instance_dir }}/bin/setenv.sh"
-      register: root_setenv_stat
-      become: yes
-      become_user: tcserver
-       
-    - name: Update setenv.sh jdk version in tcserver bin directory
-      ansible.builtin.replace:
-        path: "{{ tcserver_instance_dir }}/bin/setenv.sh"
-        regexp: 'jdk8u472-b08'
-        replace: 'jdk8u482-b08'
-        backup: yes
-      become: yes
-      become_user: tcserver
-      when: root_setenv_stat.stat.exists
+        path: "{{ jdk_archive }}"
+      register: jdk_archive_stat
 
-    - name: List tcserver instance directory after operations
-      ansible.builtin.shell: ls -lrt
+    - name: Fail if JDK archive is missing
+      ansible.builtin.fail:
+        msg: "JDK archive not found: {{ jdk_archive }}"
+      when: not jdk_archive_stat.stat.exists
+
+    - name: Extract new JDK
+      ansible.builtin.unarchive:
+        src: "{{ jdk_archive }}"
+        dest: "{{ jdk_base }}"
+        remote_src: true
+        creates: "{{ jdk_base }}/{{ new_jdk_version }}"
+      become_user: "{{ tcserver_user }}"
+
+    - name: Verify setenv.sh exists
+      ansible.builtin.stat:
+        path: "{{ setenv_file }}"
+      register: setenv_stat
+
+    - name: Fail if setenv.sh does not exist
+      ansible.builtin.fail:
+        msg: "{{ setenv_file }} not found"
+      when: not setenv_stat.stat.exists
+
+    - name: Update JDK version in setenv.sh
+      ansible.builtin.replace:
+        path: "{{ setenv_file }}"
+        regexp: "{{ old_jdk_version }}"
+        replace: "{{ new_jdk_version }}"
+        backup: true
+      register: setenv_update
+
+    - name: Display update status
+      ansible.builtin.debug:
+        msg: >-
+          JDK reference updated in setenv.sh: {{ setenv_update.changed }}
+
+    ###########################################################################
+    # Restart only when configuration changed
+    ###########################################################################
+
+    - name: Restart tcServer after JDK update
+      when: setenv_update.changed
+      block:
+
+        - name: Stop tcServer
+          ansible.builtin.shell: |
+            {{ tcserver_instance_dir }}/bin/tcruntime-ctl.sh stop
+          become_user: "{{ tcserver_user }}"
+          register: stop_result
+          changed_when: true
+
+        - name: Wait for tcServer to stop
+          ansible.builtin.shell: |
+            pgrep -af "{{ tcserver_instance_dir }}" || true
+          register: stop_check
+          retries: 12
+          delay: 10
+          until: stop_check.stdout == ""
+          changed_when: false
+
+        - name: Start tcServer
+          ansible.builtin.shell: |
+            {{ tcserver_instance_dir }}/bin/tcruntime-ctl.sh start
+          become_user: "{{ tcserver_user }}"
+          register: start_result
+          changed_when: true
+
+        - name: Wait for application startup
+          ansible.builtin.pause:
+            seconds: 30
+
+        - name: Verify tcServer Java process is running
+          ansible.builtin.shell: |
+            pgrep -af java
+          register: tcserver_process_check
+          changed_when: false
+
+        - name: Display running Java processes
+          ansible.builtin.debug:
+            var: tcserver_process_check.stdout_lines
+
+        - name: Assert tcServer started successfully
+          ansible.builtin.assert:
+            that:
+              - tcserver_process_check.stdout != ""
+            fail_msg: "tcServer restart failed."
+            success_msg: "tcServer restarted successfully."
+
+      rescue:
+
+        - name: Display stop output
+          ansible.builtin.debug:
+            var: stop_result.stdout_lines
+          when: stop_result is defined
+
+        - name: Display start output
+          ansible.builtin.debug:
+            var: start_result.stdout_lines
+          when: start_result is defined
+
+        - name: Fail restart process
+          ansible.builtin.fail:
+            msg: "tcServer restart failed after JDK update."
+
+    ###########################################################################
+    # Validation
+    ###########################################################################
+
+    - name: Verify setenv.sh contains new JDK version
+      ansible.builtin.shell: |
+        grep "{{ new_jdk_version }}" "{{ setenv_file }}"
+      register: setenv_validation
+      changed_when: false
+
+    - name: Display setenv.sh validation
+      ansible.builtin.debug:
+        var: setenv_validation.stdout_lines
+
+    - name: Execute java -version from new JDK
+      ansible.builtin.shell: |
+        {{ jdk_base }}/{{ new_jdk_version }}/bin/java -version 2>&1
+      become_user: "{{ tcserver_user }}"
+      register: java_version
+      changed_when: false
+
+    - name: Display Java version
+      ansible.builtin.debug:
+        var: java_version.stdout_lines
+
+    - name: Validate expected Java version
+      ansible.builtin.assert:
+        that:
+          - expected_java_version in java_version.stdout
+        fail_msg: |
+          JDK validation failed.
+          Expected: {{ expected_java_version }}
+          Actual output:
+          {{ java_version.stdout }}
+        success_msg: |
+          JDK successfully upgraded to {{ expected_java_version }}
+
+    - name: List tcServer instance directory after update
+      ansible.builtin.command: ls -lrt
       args:
         chdir: "{{ tcserver_instance_dir }}"
-      become_user: tcserver
+      become_user: "{{ tcserver_user }}"
       register: ls_after
+      changed_when: false
 
-    - name: Show listing after operations
+    - name: Display tcServer instance directory contents
       ansible.builtin.debug:
         var: ls_after.stdout_lines
-
