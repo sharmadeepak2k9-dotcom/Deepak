@@ -42,6 +42,7 @@
 
   vars:
     tcserver_user: tcserver
+    tcserver_group: nexlynk
     tcserver_service_name: tcServer
 
     old_jdk_version: "jdk8u{{oldjdk}}-{{oldbd}}"
@@ -62,7 +63,7 @@
         path: "{{ jdk_base }}"
         state: directory
         owner: "{{ tcserver_user }}"
-        group: "{{ tcserver_user }}"
+        group: "{{ tcserver_group }}"
         mode: "0755"
 
     - name: List JDK directory contents before update
