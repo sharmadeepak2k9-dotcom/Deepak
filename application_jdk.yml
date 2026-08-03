@@ -50,7 +50,7 @@
 
     expected_java_version: "1.8.0_{{newjdk}}"
 
-    jdk_archive: "/home/tcserver/OpenJDK8U-jdk_x64_linux_hotspot_8u{{newjdk}}{{newjdk}}.tar.gz"
+    jdk_archive: "/home/tcserver/OpenJDK8U-jdk_x64_linux_hotspot_8u{{newjdk}}{{newbd}}.tar.gz"
 
     jdk_base: "{{ tc_base }}/java"
     tcserver_instance_dir: "{{ tc_base }}/tcserver/pivotal-tc-server/instances/nexlynkdms"
