@@ -1,113 +1,199 @@
 ---
-- name: jdkupdateforhcomm
+- name: JDK Update for HCOMM - Prechecks
   hosts: "{{ host_filter }}"
   gather_facts: false
 
   tasks:
+
     - name: Ping target host
       ansible.builtin.ping:
       register: ping_result
 
     - name: Show success message
       ansible.builtin.debug:
-        msg: "success"
+        msg: "Host {{ inventory_hostname }} is reachable"
       when: ping_result.ping == 'pong'
 
     - name: Check for Java processes
-      ansible.builtin.shell: "ps -ef | grep java"
+      ansible.builtin.shell: pgrep -af java
       register: ps_result
       changed_when: false
+      failed_when: false
 
     - name: Show Java process output
       ansible.builtin.debug:
         var: ps_result.stdout_lines
 
-    - name: Switch to hcomm user and verify
-      ansible.builtin.shell: 'su - hcomm -c "whoami"'
-      become: yes
-      register: su_result
+    - name: Verify hcomm user access
+      ansible.builtin.command: whoami
+      become: true
+      become_user: hcomm
+      register: hcomm_user_check
       changed_when: false
-      failed_when: false
 
-    - name: Show su result
+    - name: Show hcomm user result
       ansible.builtin.debug:
-        var: su_result.stdout
+        msg: "Executing as {{ hcomm_user_check.stdout }}"
 
-- name: unzip JDK and back up hcomm
+
+- name: Upgrade JDK and Restart HCOMM
   hosts: "{{ host_filter }}"
-  become: yes
+  become: true
+  gather_facts: false
+
   vars:
+    # JDK Version Parameters
+    jdk_major: "17"
+    jdk_minor: "0.19"
+    jdk_build: "10"
+
+    # JDK Archive
+    jdk_archive: "/home/hcomm/OpenJDK17U-jdk_x64_linux_hotspot_17.0.19_10.tar.gz"
+
+    # Derived Variables
+    jdk_version: "{{ jdk_major }}.{{ jdk_minor }}+{{ jdk_build }}"
+    jdk_dir_name: "jdk-{{ jdk_version }}"
+
+    # HCOMM Variables
     jdk_base: "{{ hc_base }}/java"
     hcomm_instance_dir: "{{ hc_base }}/hcomm/hconnect"
+    hcomm_service_name: "hcomm"
 
   tasks:
-    # zip is assumed present on the host; no installation step required
 
-    # the following operations will run unconditionally
-
-
-    - name: Ensure jdk base directory exists
-      file:
+    - name: Ensure JDK base directory exists
+      ansible.builtin.file:
         path: "{{ jdk_base }}"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
-    - name: List contents of hcomm base
-      ansible.builtin.shell: ls -lrt
+    - name: List contents of JDK directory before change
+      ansible.builtin.command: ls -lrt
       args:
         chdir: "{{ jdk_base }}"
       become_user: hcomm
       register: ls_before
+      changed_when: false
 
     - name: Show listing before operations
       ansible.builtin.debug:
         var: ls_before.stdout_lines
 
-    - name: Check hcomm instance directory exists
+    - name: Verify JDK archive exists
+      ansible.builtin.stat:
+        path: "{{ jdk_archive }}"
+      register: jdk_archive_stat
+
+    - name: Fail if JDK archive is missing
+      ansible.builtin.fail:
+        msg: "JDK archive {{ jdk_archive }} does not exist"
+      when: not jdk_archive_stat.stat.exists
+
+    - name: Check HCOMM instance directory exists
       ansible.builtin.stat:
         path: "{{ hcomm_instance_dir }}"
       register: hcomm_instance_dir_stat
-      become_user: hcomm
 
-    - name: Fail if hcomm instance directory is missing
+    - name: Fail if HCOMM instance directory is missing
       ansible.builtin.fail:
-        msg: "instance directory {{ hcomm_instance_dir }} does not exist"
+        msg: "Instance directory {{ hcomm_instance_dir }} does not exist"
       when: not hcomm_instance_dir_stat.stat.exists
 
-      
-    - name: Extract tar archive
+    - name: Extract JDK archive
       ansible.builtin.unarchive:
-        src: /home/hcomm/OpenJDK17U-jdk_x64_linux_hotspot_17.0.19_10.tar.gz
+        src: "{{ jdk_archive }}"
         dest: "{{ jdk_base }}"
-        remote_src: yes
-      become: yes
+        remote_src: true
 
-    
+    - name: Verify extracted JDK exists
+      ansible.builtin.stat:
+        path: "{{ jdk_base }}/{{ jdk_dir_name }}"
+      register: extracted_jdk
+
+    - name: Fail if JDK extraction failed
+      ansible.builtin.fail:
+        msg: "JDK extraction failed. Directory {{ jdk_base }}/{{ jdk_dir_name }} not found."
+      when: not extracted_jdk.stat.exists
+
     - name: Check if hcommservice.sh exists
       ansible.builtin.stat:
         path: "{{ hcomm_instance_dir }}/hcommservice.sh"
-      register: root_setenv_stat
-      become: yes
+      register: hcommservice_stat
       become_user: hcomm
-       
-    - name: Update setenv.sh jdk version in hcomm bin directory
+
+    - name: Fail if hcommservice.sh is missing
+      ansible.builtin.fail:
+        msg: "{{ hcomm_instance_dir }}/hcommservice.sh not found"
+      when: not hcommservice_stat.stat.exists
+
+    - name: Capture current JDK reference
+      ansible.builtin.shell: >
+        grep -o 'jdk-17\.0\.[0-9]\+\+[0-9]\+'
+        {{ hcomm_instance_dir }}/hcommservice.sh | head -1
+      register: current_jdk
+      changed_when: false
+      failed_when: false
+      become_user: hcomm
+
+    - name: Show current JDK reference
+      ansible.builtin.debug:
+        msg: "Current JDK: {{ current_jdk.stdout | default('Not Found') }}"
+
+    - name: Update JDK version in hcommservice.sh
       ansible.builtin.replace:
         path: "{{ hcomm_instance_dir }}/hcommservice.sh"
         regexp: 'jdk-17\.0\.[0-9]+\+[0-9]+'
-        replace: 'jdk-17.0.19+10'
-        backup: yes
-      become: yes
+        replace: "{{ jdk_dir_name }}"
+        backup: true
+      register: replace_result
       become_user: hcomm
-      when: root_setenv_stat.stat.exists
 
-    - name: List hcomm instance directory after operations
-      ansible.builtin.shell: ls -lrt
-      args:
-        chdir: "{{ hcomm_instance_dir }}"
-      become_user: hcomm
-      register: ls_after
-
-    - name: Show listing after operations
+    - name: Display update result
       ansible.builtin.debug:
-        var: ls_after.stdout_lines
+        msg:
+          - "Target JDK: {{ jdk_dir_name }}"
+          - "Configuration Updated: {{ replace_result.changed }}"
 
+    - name: Restart HCOMM service after JDK update
+      when: replace_result.changed
+      block:
+
+        - name: Restart HCOMM service
+          ansible.builtin.systemd:
+            name: "{{ hcomm_service_name }}"
+            state: restarted
+          register: restart_result
+
+        - name: Wait for application startup
+          ansible.builtin.pause:
+            seconds: 30
+
+        - name: Get HCOMM service status
+          ansible.builtin.systemd:
+            name: "{{ hcomm_service_name }}"
+          register: service_status
+
+        - name: Display HCOMM service status
+          ansible.builtin.debug:
+            msg:
+              - "Service: {{ hcomm_service_name }}"
+              - "State: {{ service_status.status.ActiveState }}"
+              - "SubState: {{ service_status.status.SubState }}"
+
+        - name: Verify Java processes are running
+          ansible.builtin.shell: pgrep -af java
+          register: hcomm_process_check
+          changed_when: false
+          failed_when: false
+
+        - name: Display running Java processes
+          ansible.builtin.debug:
+            var: hcomm_process_check.stdout_lines
+
+        - name: Assert HCOMM restarted successfully
+          ansible.builtin.assert:
+            that:
+              - service_status.status.ActiveState == "active"
+              - hcomm_process_check.stdout != ""
+            fail_msg: "HCOMM restart failed."
+            success_msg: "HCOMM restarted successfully
