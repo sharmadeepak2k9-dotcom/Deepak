@@ -42,6 +42,9 @@
   gather_facts: false
 
   vars:
+    hcomm_user: hcomm
+    hcomm_group: nexlynk
+    hcomm_service_name: hcomm
     # JDK Version Parameters
     old_jdk_major: "17.0.19"
     old_jdk_build: "10"
@@ -49,7 +52,7 @@
     new_jdk_build: "8"
 
     # JDK Archive
-    jdk_archive: "/home/hcomm/OpenJDK17U-jdk_x64_linux_hotspot_{{old_jdk_major}}_{{old_jdk_build}}.tar.gz"
+    jdk_archive: "/home/hcomm/OpenJDK17U-jdk_x64_linux_hotspot_{{new_jdk_major}}_{{new_jdk_build}}.tar.gz"
 
     # Derived Variables
     new_jdk_version: "{{ new_jdk_major }}+{{ new_jdk_build }}"
@@ -58,7 +61,7 @@
     # HCOMM Variables
     jdk_base: "{{ hc_base }}/java"
     hcomm_instance_dir: "{{ hc_base }}/hcomm/hconnect"
-    hcomm_service_name: "hcomm"
+    
 
   tasks:
 
@@ -105,6 +108,8 @@
         src: "{{ jdk_archive }}"
         dest: "{{ jdk_base }}"
         remote_src: true
+        creates: "{{ jdk_base }}/{{ new_jdk_version }}"
+      become_user: "{{ hcomm_user }}"
 
     - name: Verify extracted JDK exists
       ansible.builtin.stat:
