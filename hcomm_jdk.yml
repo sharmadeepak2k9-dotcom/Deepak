@@ -197,4 +197,4 @@
               - service_status.status.ActiveState == "active"
               - hcomm_process_check.stdout != ""
             fail_msg: "HCOMM restart failed."
-            success_msg: "HCOMM restarted successfully
+            success_msg: "HCOMM restarted successfully"
