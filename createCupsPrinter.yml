@@ -1,0 +1,154 @@
+# Create one or more CUPS print queues (equivalent to the manual CUPS web UI flow:
+#   Admin (no login needed in script) -> Add Printer -> LPD/LPR Host or Printer).
+#
+# Manual steps this playbook automates:
+#   * Ensure the printer is not already listed (idempotent - existing queues skipped).
+#   * Connection:  lpd://<ip>/lp
+#   * Name:        <printer name>
+#   * Description: <name> - <ip>
+#   * Location:    <location>
+#   * Share this printer (printer-is-shared=true)
+#   * Make/Model:
+#       - "raw" for every printer EXCEPT the multifunction MFB (e.g. zb = raw).
+#       - MFB uses the Generic PCL Laser Printer driver (no external PPD required).
+#
+# Idempotent: a queue is only created when it does not already exist, and a
+# timestamped backup of printers.conf is taken before any change is made.
+#
+# Usage (extra-vars example):
+#   host_filter=<inventory-target>
+#   printers='[{"name":"011zb1","ip":"10.0.2.65","location":"Biomat Dallas","type":"raw"},
+#              {"name":"011mfb1","ip":"10.0.2.70","location":"Biomat Dallas","type":"mfb"}]'
+#
+# Rollback: run `lpadmin -x <queue>` to remove a queue, or copy the chosen
+# /etc/cups/printers.conf.bak-* back over /etc/cups/printers.conf and
+# `systemctl restart cups`.
+
+- hosts: "{{ host_filter }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    # Make/model string used by lpadmin for each supported printer "type".
+    # "raw" => no driver (Make: Raw).  "mfb" => Generic PCL Laser Printer driver.
+    printer_model_map:
+      raw: raw
+      mfb: "drv:///sample.drv/generpcl.ppd"
+
+  tasks:
+    - name: Validate the printers list was supplied and is well-formed
+      ansible.builtin.assert:
+        that:
+          - printers is defined
+          - printers | length > 0
+          - printers | map(attribute='name') | list | length == printers | length
+          - printers | map(attribute='ip') | list | length == printers | length
+          - printers | map(attribute='location') | list | length == printers | length
+          - printers | map(attribute='type', default='raw') | difference(printer_model_map.keys() | list) | length == 0
+        fail_msg: >-
+          'printers' must be a non-empty list, each item needing 'name', 'ip' and
+          'location', with an optional 'type' of {{ printer_model_map.keys() | list }}.
+
+    #Temp testing check
+    - name: Ensure CUPS socket is active (OL8 uses socket activation)
+      ansible.builtin.systemd:
+        name: cups.socket
+        state: started
+      register: cups_socket
+      failed_when: cups_socket.status.ActiveState != 'active'
+      changed_when: false
+
+
+    - name: Verify CUPS UNIX socket exists
+      ansible.builtin.stat:
+        path: /run/cups/cups.sock
+      register: cups_sock
+
+    - name: Fail if CUPS socket is missing
+      ansible.builtin.fail:
+        msg: "CUPS is not responding — cups.sock missing on {{ inventory_hostname }}."
+      when: not cups_sock.stat.exists
+
+
+    - name: Enumerate existing print queues
+      ansible.builtin.command: lpstat -e
+      register: existing_queues
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Build list of printers that need to be created
+      ansible.builtin.set_fact:
+        printers_to_add: >-
+          {{ printers
+             | rejectattr('name', 'in', existing_queues.stdout_lines)
+             | list }}
+
+    - name: Report printers that already exist and will be skipped
+      ansible.builtin.debug:
+        msg: >-
+          Already present, skipping:
+          {{ printers | map(attribute='name')
+             | intersect(existing_queues.stdout_lines) | list }}
+      when: (printers | map(attribute='name') | intersect(existing_queues.stdout_lines) | list) | length > 0
+
+    - name: End play when there is nothing to create
+      ansible.builtin.meta: end_host
+      when: printers_to_add | length == 0
+
+    - name: Check whether printers.conf exists
+      ansible.builtin.stat:
+        path: /etc/cups/printers.conf
+      register: printers_conf
+
+    - name: Back up printers.conf before creating any queue
+      ansible.builtin.copy:
+        src: /etc/cups/printers.conf
+        dest: "/etc/cups/printers.conf.bak-{{ now(fmt='%Y%m%d-%H%M%S') }}"
+        remote_src: true
+        mode: preserve
+      when: printers_conf.stat.exists
+
+    - name: Create the new print queues via lpadmin (LPD/LPR)
+      ansible.builtin.command:
+        argv:
+          - /sbin/lpadmin
+          - -p
+          - "{{ item.name }}"
+          - -v
+          - "lpd://{{ item.ip }}/lp"
+          - -L
+          - "{{ item.location }}"
+          - -D
+          - "{{ item.name }} - {{ item.ip }}"
+          - -o
+          - printer-is-shared=true
+          - -m
+          - "{{ printer_model_map[item.type | default('raw')] }}"
+      loop: "{{ printers_to_add }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.type | default('raw') }})"
+
+    - name: Enable the new print queues
+      ansible.builtin.command: "/sbin/cupsenable {{ item.name }}"
+      loop: "{{ printers_to_add }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: Set the new print queues to accept jobs
+      ansible.builtin.command: "/sbin/cupsaccept {{ item.name }}"
+      loop: "{{ printers_to_add }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: List the resulting print queues
+      ansible.builtin.command: lpstat -p
+      register: final_queues
+      changed_when: false
+
+    - name: Show the resulting print queues
+      ansible.builtin.debug:
+        var: final_queues.stdout_lines

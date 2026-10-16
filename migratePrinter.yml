@@ -1,0 +1,66 @@
+- hosts: "{{ host_filter }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    desired_policy: retry-job
+
+  tasks:
+    - name: Validate desired_policy
+      ansible.builtin.assert:
+        that:
+          - desired_policy is defined
+          - desired_policy in ['abort-job', 'retry-current-job', 'retry-job', 'stop-printer']
+        fail_msg: "desired_policy must be one of: abort-job, retry-current-job, retry-job, stop-printer."
+        quiet: true
+
+    - name: Enumerate queues on OL8 using lpstat
+      ansible.builtin.command: lpstat -p
+      register: lpstat_out
+      changed_when: false
+
+
+    - name: Extract queue names from lpstat output
+      ansible.builtin.set_fact:
+        queues: "{{ lpstat_out.stdout_lines | map('regex_search', '^printer (\\S+)', '\\1') | map('first') | reject('match','^\\[.*\\]$') | list }}"
+
+
+    - name: End cleanly if no queues exist
+      when: queues | length == 0
+      block:
+        - ansible.builtin.debug:
+            msg: "No queues found on {{ inventory_hostname }} — nothing to migrate."
+        - ansible.builtin.meta: end_host
+
+    - name: Backup printers.conf before applying policy
+      ansible.builtin.copy:
+        src: /etc/cups/printers.conf
+        dest: "/etc/cups/printers.conf.bak-{{ now(fmt='%Y%m%d-%H%M%S') }}"
+        remote_src: true
+        mode: preserve
+
+    - name: Apply desired error policy to each queue
+      ansible.builtin.command: >
+        lpadmin -p {{ item }} -o printer-error-policy={{ desired_policy }}
+      loop: "{{ queues }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Enable each queue
+      ansible.builtin.command: "cupsenable {{ item }}"
+      loop: "{{ queues }}"
+      changed_when: true
+
+    - name: Accept jobs on each queue
+      ansible.builtin.command: "cupsaccept {{ item }}"
+      loop: "{{ queues }}"
+      changed_when: true
+
+    - name: Show final queue state
+      ansible.builtin.command: lpstat -p
+      register: final
+      changed_when: false
+
+    - ansible.builtin.debug:
+        var: final.stdout_lines

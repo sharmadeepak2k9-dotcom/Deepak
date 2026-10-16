@@ -1,0 +1,147 @@
+---
+# Read-only harvest of the CUPS print queues on the CURRENT (e.g. OL7) print
+# server, producing a `printers` list in the exact shape createCupsPrinter.yml
+# consumes -- so queues can be recreated on a NEW (OL8) host WITHOUT copying
+# /etc/cups/printers.conf (its format / PPD paths don't port cleanly across the
+# OL7 -> OL8 CUPS jump).
+#
+# Designed as node A of a migration workflow (harvest -> review -> apply):
+#   A) harvestCupsPrinters.yml  (this)  -> set_stats `printers`   [runs on OLD host]
+#   B) createCupsPrinter.yml            consumes `printers`        [runs on NEW host]
+# In AAP, `printers` published via set_stats flows to node B as extra-vars.
+#
+# Best-effort mapping (design decision): a queue that maps cleanly to
+# createCupsPrinter's model (an IP-based device + a raw or Generic-PCL driver)
+# goes in `printers`; anything else (no parseable IP, or a real vendor PPD such
+# as an HP driver) goes in `printers_review` WITH A REASON and is NOT
+# auto-migrated -- so you handle the problematic few by hand and the rest sail
+# through.
+#
+# STRICTLY READ-ONLY: reads /etc/cups/printers.conf and runs awk only. It never
+# modifies the source server.
+#
+# NOTE: recreated queues use createCupsPrinter's fixed device model
+# `lpd://<ip>/lp`, so a source queue that used socket://ip:9100 (etc.) is
+# normalised to lpd on the new host -- confirm that's acceptable for those.
+#
+# Usage:
+#   ansible-playbook harvestCupsPrinters.yml -e host_filter=<OLD cups group/host>
+#   # host_filter = the CUPS host group, same convention as the other cups plays
+#   #   (rp / util / util_hc / util_cups, per customer)
+#
+# Future (out of scope here): could also emit the Datadog `network` ping-check
+# config so monitoring stays in lockstep with the queues.
+
+- name: Harvest CUPS queues from OL7 host
+  hosts: "{{ host_filter }}"
+  gather_facts: false
+  become: true
+  become_method: sudo
+
+  vars:
+    printers_conf_path: /etc/cups/printers.conf
+
+  tasks:
+    - name: Confirm printers.conf exists on the source host
+      ansible.builtin.stat:
+        path: "{{ printers_conf_path }}"
+      register: pconf
+
+    - name: Abort clearly when there is nothing to harvest
+      ansible.builtin.fail:
+        msg: >-
+          {{ printers_conf_path }} not found on {{ inventory_hostname }} -
+          is this the CUPS/print host? Set host_filter to the correct group.
+      when: not pconf.stat.exists
+
+    - name: Harvest queue records (name|device|location|makemodel) from printers.conf
+      ansible.builtin.shell:
+        cmd: |
+          awk '
+            /^<(Default)?Printer /{name=$2; sub(/>$/,"",name);dev=""; loc=""; mdl=""}
+            /^DeviceURI /{dev=$2}
+            /^Location /{loc=$0; sub(/^Location +/,"",loc)}
+            /^MakeModel /{mdl=$0; sub(/^MakeModel +/,"",mdl)}
+            /^<\/Printer>/{printf "%s|%s|%s|%s\n", name, dev, loc, mdl}
+          ' {{ printers_conf_path }}
+      register: harvest_raw
+      changed_when: false
+      check_mode: false
+
+    - name: Structure the harvested lines into records
+      ansible.builtin.set_fact:
+        parsed: >-
+          {{ parsed | default([]) + [ {
+               'name': fields[0],
+               'device': fields[1],
+               'location': fields[2],
+               'model': fields[3]
+          } ] }}
+      loop: "{{ harvest_raw.stdout_lines }}"
+      loop_control:
+        label: "{{ (item.split('|'))[0] }}"
+      vars:
+        fields: "{{ item.split('|') }}"
+      when: item | trim | length > 0
+
+    - name: End cleanly when the server has no queues
+      when: (parsed | default([])) | length == 0
+      block:
+        - name: Report empty
+          ansible.builtin.debug:
+            msg: "No print queues found on {{ inventory_hostname }} - nothing to migrate."
+        - name: Stop
+          ansible.builtin.meta: end_host
+
+    - name: Classify each queue - clean (migratable) vs needs-review
+      ansible.builtin.set_fact:
+        printers: >-
+          {{ printers | default([])
+             + ( [ {'name': item.name, 'ip': ip, 'location': item.location, 'type': ptype} ]
+                 if is_clean else [] ) }}
+        printers_review: >-
+          {{ printers_review | default([])
+             + ( [ {'name': item.name, 'device': item.device | default('(none)', true),
+                    'location': item.location, 'model': item.model | default('(none)', true),
+                    'reason': reason} ]
+                 if not is_clean else [] ) }}
+      loop: "{{ parsed }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        ip: "{{ item.device | regex_search('[0-9]{1,3}(?:\\.[0-9]{1,3}){3}') | default('', true) }}"
+        model_lc: "{{ item.model | default('') | lower }}"
+        ptype: >-
+          {{ 'raw' if model_lc in ['', 'raw', 'local raw printer']
+             else ('mfb' if ('generic pcl' in model_lc or 'generpcl' in model_lc)
+             else 'unknown') }}
+        is_clean: "{{ (ip | length > 0) and (ptype in ['raw', 'mfb']) }}"
+        reason: >-
+          {{ ( (['no IP found in device URI (' ~ (item.device | default('none', true)) ~ ')']
+                 if (ip | length == 0) else [])
+             + (['unrecognised driver - needs manual mapping (' ~ (item.model | default('none', true)) ~ ')']
+                 if (ptype == 'unknown') else []) )
+             | join('; ') }}
+
+    - name: Publish the clean printers list as a workflow artifact (feeds createCupsPrinter)
+      ansible.builtin.set_stats:
+        data:
+          printers: "{{ printers | default([]) }}"
+        aggregate: false
+
+    - name: Harvest summary
+      ansible.builtin.debug:
+        msg:
+          - "Source host      : {{ inventory_hostname }}"
+          - "Ready to migrate : {{ printers | default([]) | length }}"
+          - "Needs review     : {{ printers_review | default([]) | length }}"
+          - "Ready queues     : {{ printers | default([]) | map(attribute='name') | list }}"
+
+    - name: Queues needing manual review (NOT auto-migrated)
+      ansible.builtin.debug:
+        var: printers_review
+      when: (printers_review | default([])) | length > 0
+
+    - name: Ready-to-migrate printers list (this is what flows to createCupsPrinter)
+      ansible.builtin.debug:
+        var: printers
